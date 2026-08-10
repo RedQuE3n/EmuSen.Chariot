@@ -14,6 +14,15 @@
     <OutputType>Exe</OutputType>
     <AssemblyName>EmuSen.Chariot</AssemblyName>
     <RootNamespace>EmuSen.Chariot</RootNamespace>
+
+    <!-- 0.1.0, the first released relay, on a `v*` tag. Not the same number as
+         the EmuSen.Pegasus.Core package it speaks through, which is at 0.2.2 —
+         that one versions on the protocol, this one on the server. Pegasus the
+         desktop application is 0.1.0 as well, and that is a coincidence of both
+         being released for the first time on the same day rather than a rule
+         that they move together. What has to agree between the two programs is
+         the protocol number in Hello, not the version on the download. -->
+    <Version>0.1.0</Version>
   </PropertyGroup>
 
   <ItemGroup>
@@ -30,8 +39,17 @@
     <!-- The wire types, the codec, the sealed envelope, the framing and the
          identity primitives, shared with the desktop application so there is
          one implementation of the protocol rather than two kept in step by
-         hand. Its own only dependency is FSharp.Core. -->
-    <PackageReference Include="EmuSen.Pegasus.Core" Version="0.1.0" />
+         hand. Its own only dependency is FSharp.Core.
+
+         0.2.2 rather than 0.2.0, and the difference is not the protocol — it is
+         the same wire, frame for frame. 0.2.0 and 0.2.1 left FSharp.Core
+         implicit, so each declared whatever floor the machine that packed it
+         happened to ship, and restoring either here produced an NU1605
+         downgrade against a package this project had just been told to trust.
+         That warning, raised from this file, is how the defect was found; both
+         versions are unlisted on nuget.org now. Pegasus_Design.md §7.1 in the
+         EmuSen.Pegasus repository carries the full account. -->
+    <PackageReference Include="EmuSen.Pegasus.Core" Version="0.2.2" />
     <!-- Microsoft.Data.Sqlite alone resolves SQLitePCLRaw 2.1.11, which carries
          a high-severity advisory (GHSA-2m69-gcr7-jv3q) - the very advisory §2.2
          cites against the stack this replaces. The 3.0.5 bundle pin overrides

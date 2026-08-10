@@ -9,4 +9,3 @@ out/
 *.db-shm
 *.db-wal
 
-local-packages/*.nupkg
