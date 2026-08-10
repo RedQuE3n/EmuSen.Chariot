@@ -1,0 +1,12 @@
+bin/
+obj/
+out/
+*.user
+
+# The fork arrived with 66 MB of build output and a SQLite file committed. The
+# database was the TODO scaffold's, not Chariot's, and nothing here reads it.
+*.db
+*.db-shm
+*.db-wal
+
+local-packages/*.nupkg
