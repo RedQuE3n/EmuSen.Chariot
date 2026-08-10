@@ -19,6 +19,7 @@
   <ItemGroup>
     <Compile Include="Db.fs" />
     <Compile Include="Accounts.fs" />
+    <Compile Include="ServerIdentity.fs" />
     <Compile Include="Mailbox.fs" />
     <Compile Include="Presence.fs" />
     <Compile Include="Server.fs" />

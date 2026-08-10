@@ -133,7 +133,7 @@ let ``a second key claiming a registered handle is refused`` () =
 
     use impostorId = Identity.Generate(Handle.Parse "alice")
     use impostor = running.Connect impostorId
-    impostor.SignIn()
+    Assert.False(impostor.TrySignIn(), "an impostor got all the way in")
 
     Assert.True(waitFor 5000 (fun () -> refusals.Count > 0), "an impostor was not refused")
     Assert.Contains(aliceId.Fingerprint.Value, refusals[0])
@@ -170,7 +170,7 @@ let ``a registered handle keeps its key across a restart`` () =
     second.Refused.Add refusals.Add
     use impostorId = Identity.Generate(Handle.Parse "alice")
     use impostor = new Client("127.0.0.1", second.Port, Passphrase, impostorId)
-    impostor.SignIn()
+    Assert.False(impostor.TrySignIn(), "an impostor got all the way in")
 
     Assert.True(waitFor 5000 (fun () -> refusals.Count > 0), "the restarted server forgot who owned the handle")
 
@@ -258,6 +258,14 @@ let ``queued post is stored sealed, and the server cannot read it`` () =
         bob.SignIn()
         Assert.True(waitFor 5000 (fun () -> Accounts.all(running.Db).Length = 1))
 
+    // Waiting for the departure rather than assuming it. This test used to post
+    // the moment Bob's socket was disposed, which is a race the sibling test
+    // above already knew about: a payload for a connection the server has not
+    // yet noticed is gone gets handed to a dying socket and dropped instead of
+    // queued. It passed for as long as the timing happened to hold and stopped
+    // when sign-in grew two round trips.
+    Assert.True(waitFor 5000 (fun () -> running.Server.Presence.Everyone.Length = 0))
+
     use alice = running.Connect aliceId
     alice.SignIn()
     alice.PostTo(bobId.Handle, joinKey, note "nobody at this server may read this")
@@ -329,3 +337,156 @@ let ``a client may not stamp a delivery as coming from somebody`` () =
 
     Assert.True(waitFor 5000 (fun () -> refusals.Count > 0), "a forged FromHandle was accepted")
     Assert.Contains("not a client's to write", refusals[0])
+
+// ---------------------------------------------------------------------------
+// Pass 7: Chariot proves itself
+// ---------------------------------------------------------------------------
+
+[<Fact>]
+let ``the server signs its own challenge with its own key`` () =
+    // Client.SignIn verifies the server's proof for real and throws if it does
+    // not hold, so getting through the exchange at all is the assertion. What
+    // is checked here is that the key it proved is the one the server claims
+    // and that the fingerprint matches, which is what a client will pin.
+    use running = new Running()
+    use aliceId = identity "alice"
+    use alice = running.Connect aliceId
+    alice.SignIn()
+
+    Assert.Equal(Some "chariot", alice.Server |> Option.map _.Handle.Value)
+    Assert.Equal(Some running.Server.Identity.Id, alice.Server |> Option.map _.Id)
+    Assert.Equal(Some(Fingerprint.ofPublicKey alice.ServerKey.Value), alice.Server |> Option.map _.Id)
+
+[<Fact>]
+let ``the server keeps the same key across a restart`` () =
+    // A client pins this key. A server that minted a new one on every start
+    // would look to every one of its users like an impostor, every time.
+    let db = tempDb ()
+    use aliceId = identity "alice"
+
+    let identityOf () =
+        use cts = new CancellationTokenSource()
+        use server = new Server(0, Passphrase, db)
+        server.Start()
+        server.RunAsync cts.Token |> ignore
+        use client = new Client("127.0.0.1", server.Port, Passphrase, aliceId)
+        client.SignIn()
+        cts.Cancel()
+        client.Server.Value, client.ServerKey.Value
+
+    let firstPeer, firstKey = identityOf ()
+    let secondPeer, secondKey = identityOf ()
+
+    Assert.Equal(firstPeer.Id, secondPeer.Id)
+    Assert.Equal<byte[]>(firstKey, secondKey)
+
+[<Fact>]
+let ``a database that belongs to another server is refused rather than renamed`` () =
+    // Taking the new name would present the same key under a name nobody has
+    // pinned; keeping the old one would silently ignore what the operator
+    // asked for. Both are worse than stopping.
+    let db = tempDb ()
+
+    do
+        use first = new Server(0, Passphrase, db)
+        Assert.Equal("chariot", first.Identity.Handle.Value)
+
+    let refused =
+        Assert.ThrowsAny<exn>(fun () -> new Server(0, Passphrase, db, handle = Handle.Parse "somewhere-else") |> ignore)
+
+    Assert.Contains("belongs to a server called chariot", refused.Message)
+
+[<Fact>]
+let ``holding the passphrase does not open what the server says afterwards`` () =
+    // The passphrase is the doorbell. It seals the sign-in exchange, because
+    // that exchange is what produces the session key, and nothing after it.
+    use running = new Running()
+    use aliceId = identity "alice"
+    use bobId = identity "bob"
+
+    use alice = running.Connect aliceId
+    alice.SignIn()
+
+    // A roster, pushed because somebody arrived.
+    use bob = running.Connect bobId
+    bob.SignIn()
+
+    // Two of them: the empty roster Alice got on arrival, and the one naming
+    // Bob. Both are asserted, because "the passphrase opens nothing after
+    // sign-in" is a claim about every frame and not about a lucky one.
+    let rosters =
+        [ alice.NextSealedDirect 5000; alice.NextSealedDirect 5000 ]
+
+    let door = Crypto.deriveKey Passphrase
+
+    for payload in rosters do
+        Assert.True((Crypto.tryOpenSealed door payload).IsNone, "the passphrase opened something said after sign-in")
+
+    let named =
+        rosters
+        |> List.map (fun payload -> Codec.decode (Crypto.openSealed alice.SessionKey payload))
+        |> List.collect (function
+            | Roster peers -> peers |> Array.map _.Handle.Value |> List.ofArray
+            | other -> failwith $"expected a roster, got {other.GetType().Name}")
+
+    Assert.Equal<string list>([ "bob" ], named)
+
+// ---------------------------------------------------------------------------
+// Pass 7: one person, two places
+// ---------------------------------------------------------------------------
+
+[<Fact>]
+let ``one person may be signed in from two places at once`` () =
+    // Presence used to be keyed by handle, so a laptop signing in knocked the
+    // desktop off without telling anybody. It is keyed by connection now, and
+    // the de-duplication happens where it belongs: when a roster is built.
+    use running = new Running()
+    use aliceId = identity "alice"
+    use bobId = identity "bob"
+
+    use laptop = running.Connect bobId
+    laptop.SignIn()
+    use desktop = running.Connect bobId
+    desktop.SignIn()
+
+    Assert.True(waitFor 5000 (fun () -> running.Server.Presence.Connections = 2), "the second place displaced the first")
+
+    // One person, not two, and not one per device.
+    Assert.Equal<string[]>([| "bob" |], running.Server.Presence.Everyone |> Array.map _.Handle.Value)
+
+    use alice = running.Connect aliceId
+    alice.SignIn()
+    Assert.Equal<string[]>([| "bob" |], alice.NextRoster 5000)
+
+    // And post reaches both places, because a payload handed to a laptop is not
+    // delivered to a desktop. Over-delivery is free: Yjs updates are idempotent.
+    alice.PostTo(bobId.Handle, joinKey, note "to both places")
+
+    let _, atLaptop = laptop.NextDelivery(joinKey, 5000)
+    let _, atDesktop = desktop.NextDelivery(joinKey, 5000)
+    Assert.Equal(note "to both places", atLaptop)
+    Assert.Equal(note "to both places", atDesktop)
+
+[<Fact>]
+let ``closing one device leaves the person present at the other`` () =
+    use running = new Running()
+    use bobId = identity "bob"
+    let departures = ResizeArray<PeerInfo>()
+    running.Server.SignedOut.Add departures.Add
+
+    let laptop = running.Connect bobId
+    laptop.SignIn()
+    use desktop = running.Connect bobId
+    desktop.SignIn()
+    Assert.True(waitFor 5000 (fun () -> running.Server.Presence.Connections = 2))
+
+    (laptop :> IDisposable).Dispose()
+    Assert.True(waitFor 5000 (fun () -> running.Server.Presence.Connections = 1), "the connection was not released")
+
+    // Still there, and nobody was told otherwise. Announcing a departure here
+    // would take Bob out of everybody's buddy list while he is still reachable.
+    Assert.Equal<string[]>([| "bob" |], running.Server.Presence.Everyone |> Array.map _.Handle.Value)
+    Assert.Empty departures
+
+    (desktop :> IDisposable).Dispose()
+    Assert.True(waitFor 5000 (fun () -> departures.Count = 1), "the last device leaving was not a departure")

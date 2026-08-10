@@ -50,6 +50,25 @@ module Db =
           """
           """
           CREATE INDEX IF NOT EXISTS mailbox_recipient ON mailbox (recipient, id)
+          """
+          // This server's own keypair, so it can prove to a client that it is
+          // the server that client signed in to last time. One row, and the
+          // CHECK is what makes that a property of the table rather than a rule
+          // somebody has to remember: a second identity would mean a server
+          // that could answer as either, which is exactly what pinning exists
+          // to make impossible.
+          //
+          // THE PRIVATE KEY IS STORED UNSEALED, and that is deliberate. See
+          // ServerIdentity.fs, which carries the argument beside the code that
+          // writes it: this is an SSH host key, not a user key.
+          """
+          CREATE TABLE IF NOT EXISTS server_identity (
+              id          INTEGER PRIMARY KEY CHECK (id = 1),
+              handle      TEXT NOT NULL,
+              public_key  BLOB NOT NULL,
+              private_key BLOB NOT NULL,
+              created     TEXT NOT NULL
+          )
           """ ]
 
     let private execute (connection: SqliteConnection) (sql: string) =

@@ -2,6 +2,7 @@ module EmuSen.Chariot.Program
 
 open System
 open System.Threading
+open EmuSen.Pegasus
 
 /// Chariot is a daemon, so it behaves like one: options on the command line,
 /// the secret out of the environment, status on stdout, refusals on stderr, and
@@ -19,7 +20,12 @@ let private usage =
      line, because arguments are visible to every process through ps.\n\
      \n\
      A passphrase decides who may open a session with this server. It does not\n\
-     decide who they are - that is the signature each client gives on sign-in.\n"
+     decide who they are - that is the signature each client gives on sign-in -\n\
+     and it is not what anything is sealed under once a session has started.\n\
+     \n\
+     The name this server signs in as comes from CHARIOT_HANDLE and defaults to\n\
+     'chariot'. It is fixed on first run: clients pin the key against the name,\n\
+     so changing it later would look to every one of them like a new server.\n"
 
 let rec private parse args (port, db) =
     match args with
@@ -47,7 +53,29 @@ let main argv =
         2
     | passphrase ->
 
-    use server = new Server(port, passphrase, db)
+    // Parsed before the server is built, so a malformed name is a message about
+    // the name rather than a failure somewhere inside a constructor.
+    let requested =
+        match Environment.GetEnvironmentVariable "CHARIOT_HANDLE" with
+        | null
+        | "" -> Ok ServerIdentity.defaultHandle
+        | raw -> Handle.TryParse raw |> Result.mapError (fun why -> $"CHARIOT_HANDLE: {why}")
+
+    match requested with
+    | Error why ->
+        eprintfn "%s" why
+        2
+    | Ok handle ->
+
+    // Loading the identity can refuse — a database that belongs to a server
+    // under another name — and refusing before a port is opened is the point.
+    match (try Ok(new Server(port, passphrase, db, handle = handle)) with e -> Error e.Message) with
+    | Error why ->
+        eprintfn "chariot will not start: %s" why
+        2
+    | Ok server ->
+
+    use server = server
     use cts = new CancellationTokenSource()
 
     server.SignedIn.Add(fun peer -> printfn "+ %s  %s" peer.Handle.Value peer.Id.Value)
@@ -62,6 +90,12 @@ let main argv =
 
     server.Start()
     printfn "chariot listening on %d, accounts in %s" server.Port db
+
+    // The fingerprint, on startup, because it is the only thing an operator can
+    // read aloud to somebody whose client is refusing to connect. A refused
+    // connection means the pinned key changed, and only a person can tell "we
+    // rebuilt the server" from "that is not our server".
+    printfn "signing in as %s, key %s" server.Identity.Handle.Value server.Identity.Id.Value
 
     try
         server.RunAsync(cts.Token).GetAwaiter().GetResult()

@@ -182,6 +182,66 @@ First registration of a handle at Chariot is trust-on-first-use: the first key
 to claim a handle owns it, and a later mismatch is refused and reported. Nothing
 better is available without an authority nobody wants to run.
 
+### 7.1 Chariot's own identity, and where its private key lives
+
+The paragraphs above are about clients proving themselves to Chariot. Pass 7
+closed the other direction, which was open for three passes and stated as a
+limitation each time: **a client had no way to tell one server from another.**
+
+Chariot answered a client's `Challenge` with an HMAC over the passphrase key.
+That proves possession of the passphrase — which every client holds — so it
+proved nothing about identity, and anybody with the passphrase could stand up a
+server and be believed by everyone. Chariot now has a keypair of its own, sends
+it in `Hello`, and signs the client's nonce with it. The client pins it exactly
+the way it pins a person: `KnownPeers`, trust on first use, refuse a change. One
+implementation, one table, and a server and a person share one namespace of
+handles per owner, which is deliberate — one name, one key.
+
+The handle is fixed on first run and stored beside the key. A database asked to
+run under a different name is refused rather than renamed: taking the new name
+would present the same key under a name nobody has pinned, and keeping the old
+one would silently ignore what the operator asked for. Both are worse than
+stopping, so `chariot` prints why and exits non-zero. It also prints the
+fingerprint on startup, because that is the only thing an operator can read
+aloud to somebody whose client is refusing to connect — a refusal means the
+pinned key changed, and only a person can tell "we rebuilt the server" from
+"that is not our server".
+
+**The private key is stored unsealed, mode 0600, and this is the decision here
+most worth reading before changing.** Pegasus seals a user's private key under a
+password and a test asserts it never reaches disk in the clear
+(`Pegasus_Identity.md` §3). That works because a person is present to type the
+password. A server has nobody: it starts at boot, unattended. Sealing it under
+`CHARIOT_PASSPHRASE` would put the key and the thing that opens it in the same
+environment and call it protection — and worse, that passphrase is shared with
+every client, so the server's key would be sealed under a secret its own users
+hold.
+
+So it is stored the way an SSH host key is stored, for the reason SSH stores it
+that way, and the honest statement is that **anyone who can read this database is
+this server.** Nothing here pretends to defend against an attacker who already
+has the file. The difference from Pegasus' rule is not an inconsistency; it is
+the same reasoning applied to a machine with no user at the keyboard.
+
+### 7.2 The passphrase is a doorbell again
+
+Control traffic — sign-in, rosters — was sealed under a key derived from the
+passphrase, with the fixed salt `Pegasus_Sync.md` §5 calls a weakness. Every
+client holds that passphrase, so every client could read every other client's
+roster off the wire, and a recorded session stayed readable to whoever later
+learned one shared secret.
+
+Once both ends have keypairs the fix is one step on: after each has proved
+itself, each sends an ephemeral P-256 key signed with the identity it just
+proved, and both derive a session key from the pair. `Pegasus_Sync.md` §4.3 has
+the exchange, the ordering, and what the signature on an ephemeral is for. The
+short version: an unsigned ephemeral can be replaced by whoever carries it, which
+is unauthenticated Diffie-Hellman and no better than the passphrase it replaces.
+
+Note traffic is unaffected, and that is the point of keeping the two envelopes
+apart. It is sealed under a join code Chariot never has; wrapping it in a second
+key agreed *with* this server would be strictly worse than leaving it alone.
+
 ## 8. The shared core, and `Pegasus_Design.md` §7
 
 §7 collapsed Pegasus to one assembly, on the rule that a project boundary has to
@@ -217,7 +277,7 @@ consumed through `local-packages/` until it is on GitHub Packages.
 | 5 | **Done.** The mailbox: store, deliver on reconnect, bounded | A peer that was offline for the whole exchange converges on reconnect |
 | 6 | **Done.** The transport: Pegasus connects through Chariot by handle | Two peers converge through a relay with no address or port; the ritual has not shrunk until the window offers it |
 | 6a | **Done.** The sign-in and buddy list in the Pegasus window | Pegasus' README pairing section was rewritten because it became wrong |
-| 7 | Chariot proves itself, control traffic gets a session key, and one person may be in two places | A client refuses a server whose key changed; a passphrase holder cannot read a roster; a laptop and a desktop are both present |
+| 7 | **Done.** Chariot proves itself, control traffic gets a session key, and one person may be in two places | A client refuses a server whose key changed; a passphrase holder cannot read a roster; a laptop and a desktop are both present |
 
 Each pass ends green and is committed on its own. Passes 1 and 2 are in the
 Pegasus repository; 3 touches both; 4 and 5 are Chariot; 6 and 6a are Pegasus
@@ -267,20 +327,23 @@ fixed-salt weakness, so it decides who may open a session with this server, not
 who they are. It is read from `CHARIOT_PASSPHRASE` rather than a command-line
 argument, because argv is visible to every process on the machine through `ps`.
 
-Three limitations are stated here rather than left to be discovered:
+Three limitations were stated here rather than left to be discovered. **All
+three were closed by pass 7**, and they are kept below with what became of them,
+because a limitation that is quietly deleted once it is fixed leaves a reader
+unable to tell which version of the design they are looking at.
 
-- **Chariot does not prove itself to a client.** A client's only assurance that
+- **Chariot does not prove itself to a client.** ~~A client's only assurance that
   it reached the right server is possession of the passphrase, so anyone holding
-  that can impersonate this server. Giving Chariot its own keypair is a small
-  pass and is not this one.
-- **A handle may be signed in from one place at a time.** The presence registry
-  is keyed by handle, so a second connection displaces the first rather than
-  showing one person twice in everybody's list. Displacing is the deliberate
-  choice; a laptop and a desktop signed in together is not supported.
+  that can impersonate this server.~~ Closed: §7.1. Chariot has a keypair, sends
+  it in `Hello`, and signs the client's nonce; the client pins it.
+- **A handle may be signed in from one place at a time.** ~~The presence registry
+  is keyed by handle, so a second connection displaces the first.~~ Closed: §9.2.
+  Presence is keyed by connection and de-duplicated when a roster is built.
 - **Control traffic is sealed under the server key, which Chariot can read.**
-  That is the point — sign-in and rosters are addressed to Chariot. Note
-  traffic is a different envelope and a different key, and §5 is what keeps the
-  two apart.
+  Still true of what is addressed to Chariot, and that remains the point — it has
+  to read a sign-in. What changed is *which* key: it is agreed per connection
+  rather than derived from the passphrase, so Chariot reading it no longer means
+  every other client can too. §7.2.
 
 The envelope earns itself immediately here: `Direct` means the frame is for
 Chariot and it may open it; `ToHandle` means it is somebody's note traffic,
@@ -296,8 +359,11 @@ presence deliberately does not.
 
 ## 9.2 Pass 7: the three things pass 4 left open
 
-Written down now, in the order they depend on each other, because two of them
-are the same fix seen from different ends.
+**Built.** What follows is the plan as it was written, kept because the reasoning
+in it is what the code does; §9.5 records where it turned out to be wrong.
+
+Written down in the order they depend on each other, because two of them are the
+same fix seen from different ends.
 
 ### Chariot has no identity
 
@@ -375,6 +441,44 @@ One workflow trap was found and is recorded in `NuGet.config` rather than here,
 because that is where somebody will hit it: repacking the core at the same
 version does not propagate, since NuGet caches by id and version, and the build
 fails on code you just wrote as though it did not exist.
+
+## 9.5 What pass 7 built, and the one place the plan was wrong
+
+All three landed. The exchange is `Pegasus_Sync.md` §4.3; the server's identity
+and where its private key lives is §7.1 above; presence keyed by connection is
+`Presence.fs`, and the roster de-duplicates by handle so one person appears once
+while being reachable at several places.
+
+**The plan was wrong about the mailbox, and in the safe direction.** §9.2 warned
+that with several connections per handle a queue that drops on first delivery
+would strand the second device, and proposed keeping post until every connection
+had taken it, or an acknowledgement. Neither was needed. Routing hands a payload
+to *every* connection a handle has, so nothing is queued while any device is
+present, and the queue is untouched by the change — it is still "nobody is here,
+hold this". What is genuinely not covered is a device that is offline while
+another is on: it gets nothing from the queue, and converges through `SyncStep1`
+on its next conversation instead. That is the mailbox being liveness rather than
+durability (§6.1) rather than a gap, and it is the same answer that section
+already gave.
+
+Over-delivery is free for the reason §6 gives: Yjs updates are idempotent. The
+cheap way out was available and it was the right one.
+
+Seven sabotages, seven reds, four here and three in Pegasus. Minting a fresh
+server key on every start reddens the restart test. Never switching off the door
+key reddens six, because a client that cannot read anything after sign-in cannot
+do anything. Displacing a second connection for a handle reddens both
+multi-device tests. Treating any departure as a departure reddens the one that
+says closing a laptop must not take somebody out of everybody's buddy list. In
+Pegasus: skipping the signature on an ephemeral, keeping control traffic under
+the passphrase, and believing whatever server turns up.
+
+One test was found to have been passing on timing rather than on a guarantee. It
+posted to a handle the moment that handle's socket was disposed, and a payload
+for a connection the server has not yet noticed is gone gets handed to a dying
+socket and dropped instead of queued. Its sibling already waited for the
+departure; this one now does too. Recorded rather than quietly fixed, because a
+test that passes for the wrong reason is worth knowing about.
 
 ## 10. What Chariot will not do
 
