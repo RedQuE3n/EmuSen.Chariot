@@ -267,6 +267,10 @@ stays about transport. §3.
 ## Licence
 
 GPL-3.0-or-later, as a consequence of linking `EmuSen.Pegasus.Core`, which is
-published under it. **There is no `LICENSE` file in this repository yet** — that
-is a gap rather than a statement, and it should be closed with the same text
-Pegasus carries.
+published under it.
+
+The `LICENSE` file carrying the full text is now present, and closing that gap
+was a precondition for the first binary release rather than tidying: GPL-3.0 §4
+and §5 require the licence to be conveyed *with* the work, and a release page
+offering compiled executables conveys the work to people who never see the
+repository. Source for those binaries is this repository at the `v0.1.0` tag.
