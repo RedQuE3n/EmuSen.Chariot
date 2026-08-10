@@ -216,6 +216,7 @@ consumed through `local-packages/` until it is on GitHub Packages.
 | 4 | **Done.** TCP listener, sign-in, presence, buddy list push, accounts | Two clients over loopback see each other appear and disappear |
 | 5 | The mailbox: store, deliver on reconnect, bounded | A peer that was offline for the whole exchange converges on reconnect |
 | 6 | Pegasus connects through Chariot: connect by handle, no address, no port | The pairing ritual in the README shrinks to picking a name |
+| 7 | Chariot proves itself, control traffic gets a session key, and one person may be in two places | A client refuses a server whose key changed; a passphrase holder cannot read a roster; a laptop and a desktop are both present |
 
 Each pass ends green and is committed on its own. Passes 1 and 2 are in the
 Pegasus repository; 3 touches both; 4 and 5 are Chariot; 6 is Pegasus again.
@@ -261,6 +262,58 @@ key take over a registered handle — `INSERT OR REPLACE` instead of
 `INSERT OR IGNORE` — reddens both trust-on-first-use tests, including the one
 that restarts the server to prove the accounts table outlives the process while
 presence deliberately does not.
+
+## 9.2 Pass 7: the three things pass 4 left open
+
+Written down now, in the order they depend on each other, because two of them
+are the same fix seen from different ends.
+
+### Chariot has no identity
+
+A client's only assurance that it reached the right server is possession of the
+passphrase, so anybody holding it can stand up a server and be believed. The
+exchange is already symmetric — Chariot answers a client's `Challenge` — but the
+client has nothing to check the answer against.
+
+The fix is the one Pegasus already has: give Chariot a keypair, send it in
+`Hello`, and have the client pin it on first connection and refuse a change
+after. That is `KnownPeers` pointed at a server instead of a peer, and it should
+reuse it rather than grow a second implementation.
+
+### The passphrase reads everything
+
+Control traffic — sign-in, rosters — is sealed under a key derived from the
+server passphrase, with the fixed salt `Pegasus_Sync.md` §5 already calls a
+weakness. So the passphrase is not only an admission gate: anyone holding it can
+read who is online, and a recording of a session stays readable to whoever
+learns it later.
+
+This is the same fix as the one above, one step on. Once both ends have
+keypairs, the control channel can carry an ephemeral key agreement — .NET has
+`ECDiffieHellman` on the curve already in use — and the passphrase goes back to
+being what it was supposed to be, a doorbell. Note traffic is unaffected either
+way: it is sealed under a join code Chariot never has.
+
+### A handle is in one place at a time
+
+Presence is keyed by the folded handle, so a second connection displaces the
+first. A laptop and a desktop signed in together is not supported, and the
+displacement is silent to the person it happens to.
+
+The change is to key presence by connection and de-duplicate by handle when
+building a roster, so one person appears once while being reachable at several
+places.
+
+**This one has a consequence for the mailbox, and pass 5 must not be built
+without it in view.** With one connection per handle, "delivered" is
+unambiguous. With several, a payload handed to a laptop is *not* delivered to
+the desktop, and a queue that drops on first delivery would silently strand the
+second device. Pass 5 therefore treats delivery as per-recipient-handle and
+keeps queued post until every connection for that handle has taken it — or,
+more simply, keeps it until an acknowledgement that pass 7 can extend. The
+cheap way out is available and is worth naming: because Yjs updates are
+idempotent (§6), delivering the same blob to a second device twice costs
+nothing, so the queue may over-deliver without being wrong.
 
 ## 10. What Chariot will not do
 
