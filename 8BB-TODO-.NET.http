@@ -1,0 +1,30 @@
+@HostAddress = http://localhost:5158
+
+### GET all Todo items
+GET {{HostAddress}}/api/todoitems
+Accept: application/json
+
+### POST create a new Todo item
+POST {{HostAddress}}/api/todoitems
+Content-Type: application/json
+
+{
+  "title": "Configure 8-Bit Bunker server backups",
+  "isCompleted": false
+}
+
+### GET single Todo item by ID
+GET {{HostAddress}}/api/todoitems/1
+Accept: application/json
+
+### PUT update Todo item (mark complete)
+PUT {{HostAddress}}/api/todoitems/1
+Content-Type: application/json
+
+{
+  "title": "Configure 8-Bit Bunker server backups",
+  "isCompleted": true
+}
+
+### DELETE Todo item by ID
+DELETE {{HostAddress}}/api/todoitems/1
