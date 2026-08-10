@@ -215,12 +215,42 @@ consumed through `local-packages/` until it is on GitHub Packages.
 | 3 | The envelope: routing header outside the seal; `Sync §1` and §3 corrected | Round-trip and rejection tests; a relay must not be able to open a payload |
 | 4 | **Done.** TCP listener, sign-in, presence, buddy list push, accounts | Two clients over loopback see each other appear and disappear |
 | 5 | **Done.** The mailbox: store, deliver on reconnect, bounded | A peer that was offline for the whole exchange converges on reconnect |
-| 6 | **Transport done, window not.** Pegasus connects through Chariot by handle | Two peers converge through a relay with no address or port; the ritual has not shrunk until the window offers it |
-| 6a | The sign-in and buddy list in the Pegasus window | The README's pairing section is rewritten because it became wrong |
+| 6 | **Done.** The transport: Pegasus connects through Chariot by handle | Two peers converge through a relay with no address or port; the ritual has not shrunk until the window offers it |
+| 6a | **Done.** The sign-in and buddy list in the Pegasus window | Pegasus' README pairing section was rewritten because it became wrong |
 | 7 | Chariot proves itself, control traffic gets a session key, and one person may be in two places | A client refuses a server whose key changed; a passphrase holder cannot read a roster; a laptop and a desktop are both present |
 
 Each pass ends green and is committed on its own. Passes 1 and 2 are in the
-Pegasus repository; 3 touches both; 4 and 5 are Chariot; 6 is Pegasus again.
+Pegasus repository; 3 touches both; 4 and 5 are Chariot; 6 and 6a are Pegasus
+again.
+
+### 9.4 What pass 6a found
+
+The window was the pass, and building it turned up one defect in the protocol
+that the transport tests could not have caught, because they never made the
+mistake a person makes.
+
+Two people click **Open note** a few seconds apart. Whoever clicks first speaks
+into a client with no conversation to receive it, so its `Hello` and `Challenge`
+are dropped; when the second one opens, the late end proves itself and sends
+`SyncStep1`, and the early end — never having had its own challenge answered —
+refuses that as document traffic from an unproven peer. Half a handshake, looking
+from the outside exactly like this server eating frames.
+
+The fix is in the shared core, not here: the first `Hello` a conversation
+receives is answered by re-sending our own opening move, once.
+`Pegasus_Sync.md` §4.2 carries it. Chariot is unchanged, which is the correct
+outcome — a client-side handshake defect should not be repaired in a router.
+
+Two smaller things worth recording:
+
+- **A relay address is worth remembering and a passphrase is not.** Pegasus keeps
+  a `servers` table so the address is typed once — the address being stable is
+  most of what a relay is for. It deliberately has no passphrase column, and
+  `Pegasus_Identity.md` §8 has the argument.
+- **A conversation now outlives a note.** Switching notes used to dispose the
+  document a live session was holding, which was recorded as a hazard because
+  nothing drove it. A buddy list makes it ordinary, so opening a note now drops
+  the connection first. `Pegasus_Sync.md` §4.
 
 ## 9.1 What pass 4 established, and what it left open
 
