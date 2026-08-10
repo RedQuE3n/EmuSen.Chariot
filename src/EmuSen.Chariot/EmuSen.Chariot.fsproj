@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Chariot: rendezvous and mailbox for Pegasus. Not a peer - it never holds
+       a note, never merges an update, and cannot read a word either party
+       writes. docs/Chariot_Design.md is the record; §4 is why "relay" and
+       "peer" are different things here.
+
+       NO WEB STACK, and that is the whole point of speaking the Pegasus frame
+       protocol. No ASP.NET Core, no SignalR, no Entity Framework, no OpenAPI.
+       The forked C# server had all four and this has a TCP listener. §3
+       records what that decision bought and what it deferred. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>EmuSen.Chariot</AssemblyName>
+    <RootNamespace>EmuSen.Chariot</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Db.fs" />
+    <Compile Include="Accounts.fs" />
+    <Compile Include="Presence.fs" />
+    <Compile Include="Server.fs" />
+    <Compile Include="Program.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The wire types, the codec, the sealed envelope, the framing and the
+         identity primitives, shared with the desktop application so there is
+         one implementation of the protocol rather than two kept in step by
+         hand. Its own only dependency is FSharp.Core. -->
+    <PackageReference Include="EmuSen.Pegasus.Core" Version="0.1.0" />
+    <!-- Microsoft.Data.Sqlite alone resolves SQLitePCLRaw 2.1.11, which carries
+         a high-severity advisory (GHSA-2m69-gcr7-jv3q) - the very advisory §2.2
+         cites against the stack this replaces. The 3.0.5 bundle pin overrides
+         it. Keep the pair together. -->
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.10" />
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.5" />
+  </ItemGroup>
+
+</Project>

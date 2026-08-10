@@ -59,7 +59,10 @@ of an idea from it" are different claims and only the second one is true.
 No `.gitignore`, so 200 of 211 tracked files are `bin/` and `obj/` — 66 MB of
 build output — alongside a committed `todo.db`. EF Core also pulls in
 `SQLitePCLRaw.lib.e_sqlite3` 2.1.11, which carries a known high-severity
-advisory. All three problems are removed by §3 rather than fixed.
+advisory. All three problems are removed by §3 rather than fixed, and the C#
+itself was deleted in pass 4 once the F# replaced it — 13 source files, none of
+which anything here builds on. It remains in this repository's history, which is
+the right place for code that was read and learned from rather than kept.
 
 ## 3. Why there is no web stack here at all
 
@@ -103,8 +106,9 @@ is a router and a mailbox. The protocol does have to learn something new: a way
 to say *who a sealed payload is for*, since the current framing seals the whole
 frame and leaves nothing for an intermediary to read (§5).
 
-`Pegasus_Sync.md` §1 is to be rewritten in the pass that lands the envelope, not
-left standing. The prediction it made was reasonable and it was wrong.
+`Pegasus_Sync.md` §1 **has been rewritten**, in the pass that landed the
+envelope, rather than left standing. The prediction it made was reasonable and
+it was wrong, and it now says so in place.
 
 ## 5. Routing without reading
 
@@ -115,7 +119,9 @@ envelope:
     [ int32 length ][ envelope: destination, in the clear ][ sealed frame ]
 
 The sealed part is unchanged and unreadable to Chariot. Only the envelope is
-new, and it carries the least that routing can work with.
+new, and it carries the least that routing can work with. It shipped in pass 3;
+`Pegasus_Sync.md` §3.1 is the layout as built, with two envelopes — `Direct` and
+`ToHandle` — and the rule that decides what Chariot may open at all.
 
 **This leaks metadata, and that is unavoidable.** Chariot necessarily learns who
 is connected, who sends to whom, when, and how many bytes. It does not learn
@@ -207,12 +213,54 @@ consumed through `local-packages/` until it is on GitHub Packages.
 | 1 | `EmuSen.Pegasus.Core` split out and packaged; Pegasus consumes it; `Design §7` rewritten | The existing 94 tests pass unchanged — a split that needs a test rewritten was not a split |
 | 2 | Signed challenge and key pinning, in the core; `Identity_.md` §2 hazard closed | New guards, each watched failing first |
 | 3 | The envelope: routing header outside the seal; `Sync §1` and §3 corrected | Round-trip and rejection tests; a relay must not be able to open a payload |
-| 4 | Chariot skeleton in F#: TCP listener, sign-in, presence, buddy list push | Two clients over loopback see each other appear and disappear |
+| 4 | **Done.** TCP listener, sign-in, presence, buddy list push, accounts | Two clients over loopback see each other appear and disappear |
 | 5 | The mailbox: store, deliver on reconnect, bounded | A peer that was offline for the whole exchange converges on reconnect |
 | 6 | Pegasus connects through Chariot: connect by handle, no address, no port | The pairing ritual in the README shrinks to picking a name |
 
 Each pass ends green and is committed on its own. Passes 1 and 2 are in the
 Pegasus repository; 3 touches both; 4 and 5 are Chariot; 6 is Pegasus again.
+
+## 9.1 What pass 4 established, and what it left open
+
+The sign-in exchange is deliberately the same one two peers use — `Hello`
+carrying a public key, a challenge each way, a proof — so the thing standing
+between a stranger and the roster is code the Pegasus suite already exercises
+rather than a second implementation written for a server. The forked C# server's
+presence model is kept exactly as §2 credited it: a live registry republished to
+everyone whenever it changes.
+
+The passphrase is the front door and nothing more. It is `Crypto.deriveKey` over
+a server secret, the same mechanism as a join code and carrying the same
+fixed-salt weakness, so it decides who may open a session with this server, not
+who they are. It is read from `CHARIOT_PASSPHRASE` rather than a command-line
+argument, because argv is visible to every process on the machine through `ps`.
+
+Three limitations are stated here rather than left to be discovered:
+
+- **Chariot does not prove itself to a client.** A client's only assurance that
+  it reached the right server is possession of the passphrase, so anyone holding
+  that can impersonate this server. Giving Chariot its own keypair is a small
+  pass and is not this one.
+- **A handle may be signed in from one place at a time.** The presence registry
+  is keyed by handle, so a second connection displaces the first rather than
+  showing one person twice in everybody's list. Displacing is the deliberate
+  choice; a laptop and a desktop signed in together is not supported.
+- **Control traffic is sealed under the server key, which Chariot can read.**
+  That is the point — sign-in and rosters are addressed to Chariot. Note
+  traffic is a different envelope and a different key, and §5 is what keeps the
+  two apart.
+
+The envelope earns itself immediately here: `Direct` means the frame is for
+Chariot and it may open it; `ToHandle` means it is somebody's note traffic,
+sealed under a join code Chariot does not have, and it is moved without ever
+being decoded. Routing arrives in pass 5; the refusal to decode is already true.
+
+Both new guards were watched failing. Announcing a client before it proves
+itself reddens the test that a silent client stays off the roster. Letting a new
+key take over a registered handle — `INSERT OR REPLACE` instead of
+`INSERT OR IGNORE` — reddens both trust-on-first-use tests, including the one
+that restarts the server to prove the accounts table outlives the process while
+presence deliberately does not.
 
 ## 10. What Chariot will not do
 

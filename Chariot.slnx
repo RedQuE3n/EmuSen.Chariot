@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/EmuSen.Chariot/EmuSen.Chariot.fsproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/EmuSen.Chariot.Tests/EmuSen.Chariot.Tests.fsproj" />
+  </Folder>
+</Solution>
