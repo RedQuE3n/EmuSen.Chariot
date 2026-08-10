@@ -58,6 +58,34 @@ type Client(host: string, port: int, passphrase: string, identity: Identity) =
 
         next ()
 
+    /// Sends a payload addressed to somebody else, sealed under a key this
+    /// server has no way to derive. What comes back on the far side must be
+    /// these exact bytes.
+    member _.PostTo(destination: Handle, joinKey: byte[], frame: Frame) =
+        let sealedBytes = Crypto.seal joinKey (Codec.encode frame)
+        Framing.writeSealed stream (ToHandle destination) sealedBytes ct |> _.GetAwaiter().GetResult()
+
+    /// Writes an envelope a client has no business writing, for the tests that
+    /// check the server says so.
+    member _.Forge(envelope: Envelope, joinKey: byte[], frame: Frame) =
+        let sealedBytes = Crypto.seal joinKey (Codec.encode frame)
+        Framing.writeSealed stream envelope sealedBytes ct |> _.GetAwaiter().GetResult()
+
+    /// Waits for a forwarded payload and opens it with the join code, which is
+    /// the whole point: Chariot moved something it could not read.
+    member _.NextDelivery(joinKey: byte[], timeoutMs: int) =
+        let deadline = DateTime.UtcNow.AddMilliseconds(float timeoutMs)
+
+        let rec next () =
+            if DateTime.UtcNow > deadline then
+                failwith "nothing was delivered"
+            else
+                match Framing.readSealed stream ct |> _.GetAwaiter().GetResult() with
+                | FromHandle sender, payload -> sender, Codec.decode (Crypto.openSealed joinKey payload)
+                | _ -> next ()
+
+        next ()
+
     interface IDisposable with
         member _.Dispose() =
             try

@@ -26,8 +26,10 @@ type SignIn =
 /// it. A `ToHandle` frame is somebody's note traffic, sealed under a join code
 /// Chariot does not have, and it is moved without ever being decoded. Routing
 /// arrives in the next pass; the refusal to decode is already true here.
-type Server(port: int, passphrase: string, dbPath: string) =
+type Server(port: int, passphrase: string, dbPath: string, ?queueLimit: int, ?maxAgeDays: float) =
     let key = Crypto.deriveKey passphrase
+    let queueLimit = defaultArg queueLimit Mailbox.DefaultLimit
+    let maxAgeDays = defaultArg maxAgeDays Mailbox.DefaultMaxAgeDays
     let listener = new TcpListener(IPAddress.Any, port)
     let presence = Presence()
     let signedIn = Event<PeerInfo>()
@@ -111,19 +113,28 @@ type Server(port: int, passphrase: string, dbPath: string) =
             use stream = client.GetStream()
             let writeLock = new SemaphoreSlim(1, 1)
 
-            let send frame =
-                // Blocking rather than fire-and-forget: a roster broadcast that
-                // raced another write would interleave two frames on one socket.
+            // Blocking rather than fire-and-forget, and shared by both channels:
+            // a roster broadcast racing a forwarded payload would interleave two
+            // frames on one socket and neither would decode.
+            let guarded write =
                 writeLock.Wait()
 
                 try
-                    Framing.writeFrame stream key Direct frame ct |> _.GetAwaiter().GetResult()
-                with _ ->
-                    // A peer that has gone away is not an error worth raising
-                    // from inside somebody else's broadcast.
-                    ()
+                    try
+                        write ()
+                    with _ ->
+                        // A peer that has gone away is not an error worth
+                        // raising from inside somebody else's broadcast.
+                        ()
+                finally
+                    writeLock.Release() |> ignore
 
-                writeLock.Release() |> ignore
+            let wire =
+                { Say =
+                    fun frame -> guarded (fun () -> Framing.writeFrame stream key Direct frame ct |> _.GetAwaiter().GetResult())
+                  Forward =
+                    fun envelope payload ->
+                        guarded (fun () -> Framing.writeSealed stream envelope payload ct |> _.GetAwaiter().GetResult()) }
 
             try
                 do! Handshake.asHost stream key ct
@@ -132,22 +143,35 @@ type Server(port: int, passphrase: string, dbPath: string) =
                 match outcome with
                 | Rejected why -> refused.Trigger why
                 | SignedIn peer ->
-                    presence.Arrive(peer, send) |> Option.iter (fun displaced -> displaced Bye)
+                    presence.Arrive(peer, wire) |> Option.iter (fun displaced -> displaced.Say Bye)
                     signedIn.Trigger peer
                     presence.Broadcast()
+                    this.Deliver(peer.Handle, wire)
 
                     try
                         // Nothing to do but wait: the roster is pushed, and
                         // routing is the next pass. A read that ends is a
                         // client that has gone.
+                        // readSealed, not readFrame. A ToHandle payload is
+                        // sealed under a join code this server does not have,
+                        // so decoding every frame that arrives would fail on
+                        // exactly the traffic it exists to carry.
                         while not ct.IsCancellationRequested do
-                            let! envelope, frame = Framing.readFrame stream key ct
+                            let! envelope, payload = Framing.readSealed stream ct
 
-                            match envelope, frame with
-                            | Direct, Bye -> raise (EndOfStreamException "client said goodbye")
-                            | _ -> ()
+                            match envelope with
+                            | Direct ->
+                                match Codec.decode (Crypto.openSealed key payload) with
+                                | Bye -> raise (EndOfStreamException "client said goodbye")
+                                | _ -> ()
+                            | ToHandle destination -> this.Route(peer, destination, payload)
+                            | FromHandle _ ->
+                                // FromHandle is the relay's stamp on delivery.
+                                // A client sending one is claiming to be this
+                                // server about who sent something.
+                                refused.Trigger $"{peer.Handle.Value} sent a FromHandle envelope, which is not a client's to write"
                     finally
-                        if presence.Depart(peer, send) then
+                        if presence.Depart(peer, wire) then
                             signedOut.Trigger peer
                             presence.Broadcast()
             with
@@ -158,6 +182,36 @@ type Server(port: int, passphrase: string, dbPath: string) =
 
             writeLock.Dispose()
         }
+
+    /// Hands a payload to its destination, or holds it until that handle comes
+    /// back. The payload is never opened on either path.
+    ///
+    /// An unregistered destination is refused rather than queued. Queueing for a
+    /// handle nobody has ever signed in as would let any client fill the disk by
+    /// posting to names it invented.
+    member private _.Route(sender: PeerInfo, destination: Handle, payload: byte[]) =
+        let known =
+            Accounts.all dbPath |> Array.exists (fun (handle, _) -> Handle.Parse(handle).Folded = destination.Folded)
+
+        if not known then
+            refused.Trigger $"{sender.Handle.Value} addressed {destination.Value}, which has never signed in here"
+        else
+            match presence.WireFor destination with
+            | Some recipient -> recipient.Forward (FromHandle sender.Handle) payload
+            | None -> Mailbox.put dbPath queueLimit destination sender.Handle payload |> ignore
+
+    /// Hands over everything held for a handle that has just arrived.
+    ///
+    /// Cleared by id rather than by recipient, so post that arrives while this
+    /// is running is not deleted undelivered.
+    member private _.Deliver(handle: Handle, wire: Wire) =
+        Mailbox.prune dbPath maxAgeDays |> ignore
+        let waiting = Mailbox.peek dbPath handle
+
+        for post in waiting do
+            wire.Forward (FromHandle post.Sender) post.Payload
+
+        Mailbox.clear dbPath (waiting |> List.map _.Id)
 
     /// Accepts for as long as the token allows. Every client is served on its
     /// own task, because a server that accepted one at a time would be a server

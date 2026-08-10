@@ -214,7 +214,7 @@ consumed through `local-packages/` until it is on GitHub Packages.
 | 2 | Signed challenge and key pinning, in the core; `Identity_.md` §2 hazard closed | New guards, each watched failing first |
 | 3 | The envelope: routing header outside the seal; `Sync §1` and §3 corrected | Round-trip and rejection tests; a relay must not be able to open a payload |
 | 4 | **Done.** TCP listener, sign-in, presence, buddy list push, accounts | Two clients over loopback see each other appear and disappear |
-| 5 | The mailbox: store, deliver on reconnect, bounded | A peer that was offline for the whole exchange converges on reconnect |
+| 5 | **Done.** The mailbox: store, deliver on reconnect, bounded | A peer that was offline for the whole exchange converges on reconnect |
 | 6 | Pegasus connects through Chariot: connect by handle, no address, no port | The pairing ritual in the README shrinks to picking a name |
 | 7 | Chariot proves itself, control traffic gets a session key, and one person may be in two places | A client refuses a server whose key changed; a passphrase holder cannot read a roster; a laptop and a desktop are both present |
 
@@ -314,6 +314,36 @@ more simply, keeps it until an acknowledgement that pass 7 can extend. The
 cheap way out is available and is worth naming: because Yjs updates are
 idempotent (§6), delivering the same blob to a second device twice costs
 nothing, so the queue may over-deliver without being wrong.
+
+## 9.3 What pass 5 built
+
+Routing and the mailbox, and the CRDT paid for both exactly as §6 predicted:
+there is no ordering to enforce, no acknowledgement protocol, no deduplication
+and no exactly-once anywhere in this. Post is stored, handed over, and deleted
+by id so that anything arriving mid-drain is not lost.
+
+`FromHandle` joined the envelope, because an `Update` is opaque bytes and says
+nothing about who wrote it — a client with two correspondents could not
+otherwise tell their traffic apart. It is the relay's word rather than proof,
+which is why a client sending one is refused: that is a client claiming to be
+this server about who sent something.
+
+Two bounds exist and both are deliberate. The queue is capped per recipient and
+drops **oldest** first, since a full queue that refuses new post would stay full
+forever. And post addressed to a handle that has never signed in here is refused
+rather than queued, or any client could fill the disk by writing to names it
+invented.
+
+Three sabotages, three reds. Storing the payload re-wrapped instead of as it
+arrived reddens the test that reads the database directly and asserts the server
+cannot open what it holds. Trimming the newest instead of the oldest reddens the
+bound. Delivering without clearing reddens the round trip, on the assertion that
+post does not survive its own delivery.
+
+One workflow trap was found and is recorded in `NuGet.config` rather than here,
+because that is where somebody will hit it: repacking the core at the same
+version does not propagate, since NuGet caches by id and version, and the build
+fails on code you just wrote as though it did not exist.
 
 ## 10. What Chariot will not do
 

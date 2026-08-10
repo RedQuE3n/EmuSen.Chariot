@@ -3,6 +3,18 @@ namespace EmuSen.Chariot
 open System.Collections.Concurrent
 open EmuSen.Pegasus
 
+/// The two ways Chariot puts bytes on a connection, and they are not the same
+/// thing.
+///
+/// `Say` is Chariot speaking for itself — a roster, a goodbye — sealed under the
+/// server key because it is addressed to this client. `Forward` is somebody
+/// else's sealed payload going past, and Chariot supplies only the envelope; the
+/// bytes are handed on exactly as they arrived, because it could not open them
+/// if it wanted to.
+type Wire =
+    { Say: Frame -> unit
+      Forward: Envelope -> byte[] -> unit }
+
 /// Who is signed in right now.
 ///
 /// In memory and nowhere else, on purpose. Presence is disposable by nature -
@@ -16,22 +28,22 @@ open EmuSen.Pegasus
 /// machine displaces the first, which is a real limitation and is stated in
 /// docs/Chariot_Design.md §10 rather than discovered.
 type Presence() =
-    let connected = ConcurrentDictionary<string, PeerInfo * (Frame -> unit)>()
+    let connected = ConcurrentDictionary<string, PeerInfo * Wire>()
 
     /// Adds or replaces, and returns the connection it displaced if any, so the
     /// caller can close it rather than leave a socket nobody is reading.
-    member _.Arrive(peer: PeerInfo, send: Frame -> unit) =
-        let mutable displaced = Unchecked.defaultof<PeerInfo * (Frame -> unit)>
+    member _.Arrive(peer: PeerInfo, wire: Wire) =
+        let mutable displaced = Unchecked.defaultof<PeerInfo * Wire>
         let existed = connected.TryGetValue(peer.Handle.Folded, &displaced)
-        connected[peer.Handle.Folded] <- (peer, send)
+        connected[peer.Handle.Folded] <- (peer, wire)
         if existed then Some(snd displaced) else None
 
     /// Removes only if this exact sender is still the registered one. Without
     /// that check, a displaced connection closing afterwards would evict the
     /// connection that replaced it.
-    member _.Depart(peer: PeerInfo, send: Frame -> unit) =
+    member _.Depart(peer: PeerInfo, wire: Wire) =
         match connected.TryGetValue peer.Handle.Folded with
-        | true, (_, current) when System.Object.ReferenceEquals(current, send) ->
+        | true, (_, current) when System.Object.ReferenceEquals(current, wire) ->
             connected.TryRemove peer.Handle.Folded |> ignore
             true
         | _ -> false
@@ -49,5 +61,13 @@ type Presence() =
     /// the forked C# server's ChatHub had right and is the reason that fork was
     /// worth taking at all - docs/Chariot_Design.md §2.
     member this.Broadcast() =
-        for peer, send in connected.Values do
-            send (Roster(this.RosterFor peer))
+        for peer, wire in connected.Values do
+            wire.Say(Roster(this.RosterFor peer))
+
+    /// The wire for a handle, if that handle is connected right now. This is
+    /// the whole of routing's lookup: present means hand it over, absent means
+    /// put it in the mailbox.
+    member _.WireFor(handle: Handle) =
+        match connected.TryGetValue handle.Folded with
+        | true, (_, wire) -> Some wire
+        | _ -> None

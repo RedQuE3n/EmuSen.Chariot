@@ -11,10 +11,10 @@ open EmuSen.Chariot.Tests.Clients
 let private Passphrase = "a-server-passphrase"
 
 /// A running server on an operating-system-chosen port, with its own database.
-type private Running() =
+type private Running(?queueLimit: int) =
     let cts = new CancellationTokenSource()
     let db = tempDb ()
-    let server = new Server(0, Passphrase, db)
+    let server = new Server(0, Passphrase, db, ?queueLimit = queueLimit)
     do server.Start()
     do server.RunAsync cts.Token |> ignore
 
@@ -185,3 +185,147 @@ let ``a client with the wrong passphrase never reaches sign-in`` () =
     |> ignore
 
     Assert.Empty running.Server.Presence.Everyone
+
+// ---------------------------------------------------------------------------
+// The mailbox
+// ---------------------------------------------------------------------------
+
+/// The peers' own key. Chariot never sees this and cannot derive it.
+let private joinKey = Crypto.deriveKey "7-lantern-quartz"
+
+let private note text = Update(Text.Encoding.UTF8.GetBytes(text: string))
+
+[<Fact>]
+let ``a payload for a connected peer is handed straight over`` () =
+    use running = new Running()
+    use aliceId = identity "alice"
+    use bobId = identity "bob"
+
+    use alice = running.Connect aliceId
+    alice.SignIn()
+    use bob = running.Connect bobId
+    bob.SignIn()
+    Assert.True(waitFor 5000 (fun () -> running.Server.Presence.Everyone.Length = 2))
+
+    alice.PostTo(bobId.Handle, joinKey, note "straight over")
+
+    let sender, frame = bob.NextDelivery(joinKey, 5000)
+    Assert.Equal(aliceId.Handle, sender)
+    Assert.Equal(note "straight over", frame)
+    Assert.Equal(0, Mailbox.count running.Db bobId.Handle)
+
+[<Fact>]
+let ``a payload for an absent peer waits, and arrives when they come back`` () =
+    // The pass in one test. Bob has signed in here before, so he is a known
+    // account, but he is not connected when Alice writes.
+    use running = new Running()
+    use aliceId = identity "alice"
+    use bobId = identity "bob"
+
+    do
+        use bob = running.Connect bobId
+        bob.SignIn()
+        Assert.True(waitFor 5000 (fun () -> Accounts.all(running.Db).Length = 1))
+
+    Assert.True(waitFor 5000 (fun () -> running.Server.Presence.Everyone.Length = 0))
+
+    use alice = running.Connect aliceId
+    alice.SignIn()
+    alice.PostTo(bobId.Handle, joinKey, note "left for later")
+
+    Assert.True(waitFor 5000 (fun () -> Mailbox.count running.Db bobId.Handle = 1), "nothing was queued")
+
+    use bob = running.Connect bobId
+    bob.SignIn()
+
+    let sender, frame = bob.NextDelivery(joinKey, 5000)
+    Assert.Equal(aliceId.Handle, sender)
+    Assert.Equal(note "left for later", frame)
+
+    // And it is not delivered twice on the next reconnect.
+    Assert.True(waitFor 5000 (fun () -> Mailbox.count running.Db bobId.Handle = 0), "post survived delivery")
+
+[<Fact>]
+let ``queued post is stored sealed, and the server cannot read it`` () =
+    // The end-to-end property, asserted against the database rather than the
+    // wire: if Chariot could read what it holds, everything else is theatre.
+    use running = new Running()
+    use aliceId = identity "alice"
+    use bobId = identity "bob"
+
+    do
+        use bob = running.Connect bobId
+        bob.SignIn()
+        Assert.True(waitFor 5000 (fun () -> Accounts.all(running.Db).Length = 1))
+
+    use alice = running.Connect aliceId
+    alice.SignIn()
+    alice.PostTo(bobId.Handle, joinKey, note "nobody at this server may read this")
+    Assert.True(waitFor 5000 (fun () -> Mailbox.count running.Db bobId.Handle = 1))
+
+    let held = Mailbox.peek running.Db bobId.Handle |> List.head
+    let asText = Text.Encoding.UTF8.GetString held.Payload
+    Assert.DoesNotContain("nobody at this server", asText)
+
+    // The server's own key does not open it; the peers' does.
+    Assert.True((Crypto.tryOpenSealed (Crypto.deriveKey Passphrase) held.Payload).IsNone)
+    Assert.Equal(note "nobody at this server may read this", Codec.decode (Crypto.openSealed joinKey held.Payload))
+
+[<Fact>]
+let ``the queue is bounded, and drops the oldest`` () =
+    // A bound is safe because the queue is liveness and not durability: the
+    // sender still holds a complete replica, so what is lost is promptness.
+    use running = new Running(queueLimit = 3)
+    use aliceId = identity "alice"
+    use bobId = identity "bob"
+
+    do
+        use bob = running.Connect bobId
+        bob.SignIn()
+        Assert.True(waitFor 5000 (fun () -> Accounts.all(running.Db).Length = 1))
+
+    use alice = running.Connect aliceId
+    alice.SignIn()
+
+    for i in 1..6 do
+        alice.PostTo(bobId.Handle, joinKey, note $"note {i}")
+
+    Assert.True(waitFor 5000 (fun () -> Mailbox.count running.Db bobId.Handle = 3), "the queue was not bounded")
+
+    let kept =
+        Mailbox.peek running.Db bobId.Handle
+        |> List.map (fun post -> Codec.decode (Crypto.openSealed joinKey post.Payload))
+
+    Assert.Equal<Frame list>([ note "note 4"; note "note 5"; note "note 6" ], kept)
+
+[<Fact>]
+let ``post addressed to a handle that has never signed in is refused, not queued`` () =
+    // Otherwise any client could fill the disk by writing to names it invented.
+    use running = new Running()
+    use aliceId = identity "alice"
+    let refusals = ResizeArray<string>()
+    running.Server.Refused.Add refusals.Add
+
+    use alice = running.Connect aliceId
+    alice.SignIn()
+    alice.PostTo(Handle.Parse "nobody", joinKey, note "into the void")
+
+    Assert.True(waitFor 5000 (fun () -> refusals.Count > 0), "an invented destination was accepted")
+    Assert.Contains("never signed in", refusals[0])
+    Assert.Equal(0, Mailbox.count running.Db (Handle.Parse "nobody"))
+
+[<Fact>]
+let ``a client may not stamp a delivery as coming from somebody`` () =
+    // FromHandle is the relay's word about who sent something. A client writing
+    // one is claiming to be the server.
+    use running = new Running()
+    use aliceId = identity "alice"
+    let refusals = ResizeArray<string>()
+    running.Server.Refused.Add refusals.Add
+
+    use alice = running.Connect aliceId
+    alice.SignIn()
+    alice.Forge(FromHandle(Handle.Parse "bob"), joinKey, note "pretending to be bob")
+
+    Assert.True(waitFor 5000 (fun () -> refusals.Count > 0), "a forged FromHandle was accepted")
+    Assert.Contains("not a client's to write", refusals[0])

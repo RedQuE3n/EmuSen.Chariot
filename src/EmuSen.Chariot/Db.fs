@@ -30,6 +30,26 @@ module Db =
               first_seen  TEXT NOT NULL,
               last_seen   TEXT NOT NULL
           )
+          """
+          // Post for somebody who was not connected. The payload is sealed
+          // under a join code this server does not have and never will, so it
+          // is stored as the opaque blob it is - see docs/Chariot_Design.md §6.
+          //
+          // The id is the delivery order, and it is the only ordering there is.
+          // Nothing depends on it being right: Yjs updates are idempotent and
+          // order-independent, which is what makes this table a queue rather
+          // than a log with all a log's problems.
+          """
+          CREATE TABLE IF NOT EXISTS mailbox (
+              id         INTEGER PRIMARY KEY AUTOINCREMENT,
+              recipient  TEXT NOT NULL,
+              sender     TEXT NOT NULL,
+              payload    BLOB NOT NULL,
+              queued_at  TEXT NOT NULL
+          )
+          """
+          """
+          CREATE INDEX IF NOT EXISTS mailbox_recipient ON mailbox (recipient, id)
           """ ]
 
     let private execute (connection: SqliteConnection) (sql: string) =
