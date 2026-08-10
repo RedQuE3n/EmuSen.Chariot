@@ -126,6 +126,14 @@ alone, SQLite resolves a transitive 2.1.11 carrying a high-severity advisory.
 
     CHARIOT_PASSPHRASE=hunter2 dotnet run --project src/EmuSen.Chariot -- --port 7420 --db chariot.db
 
+That is the source route, and what follows describes it. For the released
+binary instead — no .NET to install first — and for running this under systemd
+without leaking the passphrase into a world-readable unit file, see
+`docs/Pegasus_Setup.md` §6 to §8 in the
+[Pegasus repository](https://github.com/RedQuE3n/EmuSen.Pegasus). Setup for both
+programs is one document rather than two, because nobody sets up a relay without
+also setting up the thing that talks to it.
+
 Both options have defaults — port 7420, `chariot.db` beside the working
 directory — so the passphrase is the only thing that has to be supplied.
 
