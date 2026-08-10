@@ -215,7 +215,8 @@ consumed through `local-packages/` until it is on GitHub Packages.
 | 3 | The envelope: routing header outside the seal; `Sync §1` and §3 corrected | Round-trip and rejection tests; a relay must not be able to open a payload |
 | 4 | **Done.** TCP listener, sign-in, presence, buddy list push, accounts | Two clients over loopback see each other appear and disappear |
 | 5 | **Done.** The mailbox: store, deliver on reconnect, bounded | A peer that was offline for the whole exchange converges on reconnect |
-| 6 | Pegasus connects through Chariot: connect by handle, no address, no port | The pairing ritual in the README shrinks to picking a name |
+| 6 | **Transport done, window not.** Pegasus connects through Chariot by handle | Two peers converge through a relay with no address or port; the ritual has not shrunk until the window offers it |
+| 6a | The sign-in and buddy list in the Pegasus window | The README's pairing section is rewritten because it became wrong |
 | 7 | Chariot proves itself, control traffic gets a session key, and one person may be in two places | A client refuses a server whose key changed; a passphrase holder cannot read a roster; a laptop and a desktop are both present |
 
 Each pass ends green and is committed on its own. Passes 1 and 2 are in the
