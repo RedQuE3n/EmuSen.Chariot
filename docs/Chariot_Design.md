@@ -771,3 +771,73 @@ a throwaway agreement key per load that it stores nowhere. The comment in the
 core's `Messaging.signingOnly` records what would have to change first if that
 ever stopped being true — a key regenerated every boot would look to every client
 like a different server.
+
+## 15. The queue bound that was never there, and the test that could not say so
+
+0.4.0 shipped `Mailbox.put` with this as the guard on the message channel:
+
+```sql
+INSERT INTO mailbox (recipient, sender, payload, queued_at, channel)
+SELECT $recipient, $sender, $payload, $now, $channel
+WHERE 1 = 1
+```
+
+`WHERE 1 = 1` is always true. The insert always succeeded, `written` was always
+1, and the `Full` branch beneath it was unreachable code. `$limit` was bound as a
+parameter the statement never mentioned, which is the detail that makes this
+look right at a glance: everything a reader checks for is present.
+
+So **the message queue had no bound**. §13 argues at length that a full message
+queue must refuse new post rather than evict, because evicting destroys
+somebody's message and tells nobody — and the code that was supposed to do the
+refusing could not. No sender was ever told a message had not landed, because
+none ever failed to land. A relay would have accepted post for an absent
+recipient until the disk filled.
+
+The guard now lives in the statement:
+
+```sql
+WHERE (SELECT COUNT(*) FROM mailbox
+       WHERE recipient = $recipient AND channel = 1) < $limit
+```
+
+Inside the `INSERT ... SELECT` rather than as a `COUNT` before it, deliberately.
+Counting first and inserting second is two statements with a gap: two senders
+posting to the same absent recipient both read "one short of the limit" and both
+insert, and the cap is exceeded by as many senders as happen to be talking. One
+statement, and SQLite settles it. Zero rows written is not an error — it is the
+refusal.
+
+### 15.1 The part that cost the afternoon
+
+`a full message queue refuses new post and tells the sender` was written, was
+correct, and was pointed straight at this. It never reported anything, because it
+could not fail.
+
+Every read in `Clients.fs` was passed `CancellationToken.None` and blocked on
+`.GetAwaiter().GetResult()`. The `timeoutMs` deadlines around those reads are
+checked *between* reads, so they fire when frames keep arriving and the wanted
+one does not — and do nothing at all when the socket simply goes quiet. Waiting
+on an `Undeliverable` the server would never send is exactly the quiet case.
+
+The result was a suite that could neither pass nor fail. `dotnet test` ran
+**10m20s in CI before being cancelled**, and past **300s locally**, printing
+nothing either time. Because Chariot's `release.yml` is the only workflow here
+and triggers on tags alone, the merge that introduced this was never tested, and
+the first thing to run the suite was a release — which hung, so `v0.4.0` shipped
+nothing. Twice.
+
+Every read and write now runs under a token with a 20-second ceiling. It is far
+longer than any exchange in this suite needs, on purpose: the ceiling's job is to
+turn a hang into a named failure, not to police latency. With it in place the
+suite finishes in **25.7 seconds**, and the queue test failed — at 20s, on the
+read that had been silently blocking — before the SQL above made it pass.
+
+Two things worth keeping from it:
+
+- **A test that hangs is worse than a test that fails**, and worse than no test,
+  because a red test names the defect and a hung one hides both the defect and
+  itself behind an infrastructure problem. This one was read as CI being slow.
+- **A harness read with no timeout is a defect in the harness**, not a style
+  choice, in any suite that drives a real socket. The deadline has to be on the
+  read, not around it.

@@ -36,8 +36,21 @@
          card directory. It is a bump a relay operator cannot skip, because the
          protocol moved with it — a 0.3.0 client cannot sign in here, and Hello
          says so in the first frame rather than letting it be found further
-         down. §13 and §14. -->
-    <Version>0.4.0</Version>
+         down. §13 and §14.
+
+         0.4.1 is the queue bound 0.4.0 claimed and did not have: the conditional
+         insert meant to enforce it read `WHERE 1 = 1`, so the message queue took
+         post for an absent recipient without limit and no sender was ever told a
+         message had not landed. The protocol did NOT move - Hello still says 5,
+         and a 0.4.0 client signs in here unchanged - but an operator should take
+         it, because the version it fixes fills a disk and calls it success. §15.
+
+         0.4.0 SHIPPED NO BINARY, and the number is spent rather than reused. Its
+         tag was pushed while the core it depends on was still being indexed by
+         nuget.org, so restore failed; the rerun then hung 10m20s in the test job
+         on the very defect above. §15.1, and §12.3 for the last version this
+         happened to. -->
+    <Version>0.4.1</Version>
   </PropertyGroup>
 
   <ItemGroup>

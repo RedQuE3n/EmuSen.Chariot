@@ -137,12 +137,32 @@ module Mailbox =
             Queued 0L
 
         | MessageTraffic ->
+            // THE BOUND IS THE `WHERE`, and it belongs inside this statement
+            // rather than in a COUNT before it. Counting first and inserting
+            // second is two statements with a gap in the middle: two senders
+            // posting to the same absent recipient at once both read "one short
+            // of the limit" and both insert, so the cap is exceeded by as many
+            // senders as happen to be talking. INSERT ... SELECT ... WHERE is one
+            // statement and SQLite settles it.
+            //
+            // Zero rows written is therefore not an error - it IS the refusal,
+            // and the COUNT below turns it into a number the sender is told.
+            //
+            // This said `WHERE 1 = 1` and shipped that way. Always true, so the
+            // insert always succeeded, `written` was always 1, `Full` was
+            // unreachable, and $limit was bound as a parameter the SQL never
+            // mentioned. The message queue had no bound and no sender was ever
+            // told a message had not landed. The test for it could not fail: it
+            // waited on an Undeliverable that never came, through a read with no
+            // timeout, so the suite HUNG instead of going red - 10m20s in CI
+            // reporting nothing. A guard whose test cannot fail is not a guard.
             let written =
                 Db.executeWith
                     db
                     "INSERT INTO mailbox (recipient, sender, payload, queued_at, channel)
                      SELECT $recipient, $sender, $payload, $now, $channel
-                     WHERE 1 = 1"
+                     WHERE (SELECT COUNT(*) FROM mailbox
+                            WHERE recipient = $recipient AND channel = 1) < $limit"
                     [ "$recipient", box recipient.Folded
                       "$sender", box sender.Folded
                       "$payload", box payload

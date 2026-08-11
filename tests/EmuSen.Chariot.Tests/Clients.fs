@@ -4,9 +4,37 @@ open System
 open System.IO
 open System.Net.Sockets
 open System.Threading
+open System.Threading.Tasks
 open EmuSen.Pegasus
 
-let ct = CancellationToken.None
+// A read that never returns is the one failure mode a harness must not have,
+// and every read below used to have it. They were passed CancellationToken.None,
+// and the deadline loops wrapping them only look at the clock BETWEEN reads - so
+// a server that said nothing at all blocked forever rather than failing, and
+// took the whole suite with it. Every `timeoutMs` argument in this file did
+// nothing in precisely the case it exists for: it fires when frames keep
+// arriving and the wanted one does not, never when the socket goes quiet.
+//
+// 0.4.0 is what made that reachable. The envelope changed shape - a routed
+// frame names its channel, a delivery names the post it came out of - so a test
+// waiting on a frame the new server no longer sends waits forever. `dotnet test`
+// wedged for 10m20s in CI and past 300s locally and reported NOTHING either
+// time: a suite that could neither pass nor fail, which is worse than a red one
+// because a red one tells you where to look.
+//
+// Every read and write now runs under a token with a hard ceiling. It is far
+// longer than any exchange here needs, deliberately - its job is to turn a hang
+// into a named failure, not to police latency. The per-call deadlines still do
+// that, and they finally work, because the read underneath them can now return.
+let private ceiling = TimeSpan.FromSeconds 20.0
+
+let private await (work: CancellationToken -> Task<'a>) : 'a =
+    use cts = new CancellationTokenSource(ceiling)
+
+    try
+        work cts.Token |> _.GetAwaiter().GetResult()
+    with :? OperationCanceledException ->
+        failwith $"the socket went quiet for {ceiling.TotalSeconds}s: no frame arrived"
 
 /// A client of Chariot, driven by hand.
 ///
@@ -25,16 +53,15 @@ type Client(host: string, port: int, passphrase: string, identity: Identity) =
     do client.Connect(host, port)
     do client.NoDelay <- true
     let stream = client.GetStream()
-    do Handshake.asJoiner stream doorKey ct |> _.GetAwaiter().GetResult()
+    do await (Handshake.asJoiner stream doorKey)
 
     let mutable server: PeerInfo option = None
     let mutable serverKey: byte[] option = None
 
-    let read () =
-        Framing.readFrame stream key ct |> _.GetAwaiter().GetResult()
+    let read () = await (Framing.readFrame stream key)
 
     let write frame =
-        Framing.writeFrame stream key Direct frame ct |> _.GetAwaiter().GetResult()
+        await (Framing.writeFrame stream key Direct frame)
 
     member _.Identity = identity
 
@@ -59,7 +86,7 @@ type Client(host: string, port: int, passphrase: string, identity: Identity) =
             if DateTime.UtcNow > deadline then
                 failwith "the server said nothing"
             else
-                match Framing.readSealed stream ct |> _.GetAwaiter().GetResult() with
+                match await (Framing.readSealed stream) with
                 | Direct, payload -> payload
                 | _ -> next ()
 
@@ -152,13 +179,13 @@ type Client(host: string, port: int, passphrase: string, identity: Identity) =
     /// these exact bytes.
     member _.PostTo(destination: Handle, joinKey: byte[], frame: Frame) =
         let sealedBytes = Crypto.seal joinKey (Codec.encode frame)
-        Framing.writeSealed stream (ToHandle(destination, NoteTraffic)) sealedBytes ct |> _.GetAwaiter().GetResult()
+        await (Framing.writeSealed stream (ToHandle(destination, NoteTraffic)) sealedBytes)
 
     /// Writes an envelope a client has no business writing, for the tests that
     /// check the server says so.
     member _.Forge(envelope: Envelope, joinKey: byte[], frame: Frame) =
         let sealedBytes = Crypto.seal joinKey (Codec.encode frame)
-        Framing.writeSealed stream envelope sealedBytes ct |> _.GetAwaiter().GetResult()
+        await (Framing.writeSealed stream envelope sealedBytes)
 
     /// Publishes this client's card, which is what makes it reachable by
     /// message at all.
@@ -191,8 +218,7 @@ type Client(host: string, port: int, passphrase: string, identity: Identity) =
             Codec.encode (Message(id, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), body))
 
         let sealedBytes = Messaging.seal identity theirMessagingKey plain
-        Framing.writeSealed stream (ToHandle(recipient, MessageTraffic)) sealedBytes ct
-        |> _.GetAwaiter().GetResult()
+        await (Framing.writeSealed stream (ToHandle(recipient, MessageTraffic)) sealedBytes)
 
         id
 
@@ -205,7 +231,7 @@ type Client(host: string, port: int, passphrase: string, identity: Identity) =
             if DateTime.UtcNow > deadline then
                 failwith "no message was delivered"
             else
-                match Framing.readSealed stream ct |> _.GetAwaiter().GetResult() with
+                match await (Framing.readSealed stream) with
                 | FromHandle(who, MessageTraffic, post), payload ->
                     match Messaging.tryOpen identity sender payload with
                     | Some plain ->
@@ -243,7 +269,7 @@ type Client(host: string, port: int, passphrase: string, identity: Identity) =
             if DateTime.UtcNow > deadline then
                 failwith "nothing was delivered"
             else
-                match Framing.readSealed stream ct |> _.GetAwaiter().GetResult() with
+                match await (Framing.readSealed stream) with
                 | FromHandle(sender, _, _), payload -> sender, Codec.decode (Crypto.openSealed joinKey payload)
                 | _ -> next ()
 
