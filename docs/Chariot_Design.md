@@ -841,3 +841,37 @@ Two things worth keeping from it:
 - **A harness read with no timeout is a defect in the harness**, not a style
   choice, in any suite that drives a real socket. The deadline has to be on the
   read, not around it.
+
+### 15.2 The other reason `v0.4.0` shipped nothing: order
+
+Before the hang, that tag failed for a duller reason worth writing down, because
+it will happen again on every protocol change that spans both repositories.
+
+`v0.4.0` was pushed here at **03:42:55Z**. The `core-v0.4.0` job that publishes
+`EmuSen.Pegasus.Core` next door had finished about **fifty seconds** earlier.
+Restore ran at 03:43:04Z and said:
+
+```
+error NU1102: Unable to find package EmuSen.Pegasus.Core with version (>= 0.4.0)
+  - Found 4 version(s) in nuget.org [ Nearest version: 0.3.0 ]
+```
+
+Publishing to nuget.org is not the same event as the package being resolvable
+from it. The push succeeds, the workflow goes green, and indexing takes minutes
+more. Fifty seconds was not enough, and no amount of care in this repository
+would have made it enough.
+
+So the order is a rule, not a preference:
+
+1. Tag `core-v*` in `EmuSen.Pegasus` and let the publish job finish.
+2. **Confirm the version actually resolves** —
+   `curl -s https://api.nuget.org/v3-flatcontainer/emusen.pegasus.core/index.json`
+   lists it. This is the step that was skipped, and it is two seconds.
+3. Only then tag `v*` here.
+
+The `.fsproj` beside the `PackageReference` already said this repository cannot
+build until the core is on nuget.org, and it was right; what neither it nor
+anything else said was that "published" and "restorable" are minutes apart. The
+failure is loud and harmless — a red restore, nothing shipped, nothing to undo —
+but it burns a version number, because a tag that has run is not re-pushed. §12.3
+carries the first version this project spent that way and this is the second.

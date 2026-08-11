@@ -28,6 +28,12 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+
+    # The same backstop ci.yml carries, and for the same reason: this job is
+    # where the hang actually happened. It blocked 10m20s against a tag and was
+    # killed by hand, and the default that let it do so is 360 minutes. §15.1.
+    timeout-minutes: 10
+
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4

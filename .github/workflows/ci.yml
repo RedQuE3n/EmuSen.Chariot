@@ -1,0 +1,59 @@
+# Build and run the suite on every push and pull request.
+#
+# WHY THIS FILE EXISTS, and it is worth knowing before changing it: until it did,
+# `release.yml` was the only workflow in this repository and it triggers on tags
+# alone. Nothing ran `dotnet test` on a merge. The messaging work that became
+# 0.4.0 went into main having never been tested by CI, carrying a message queue
+# whose bound was `WHERE 1 = 1` - always true, so the queue had no bound at all -
+# and the first thing to run the suite against it was a release. §15.
+#
+# A release is the worst possible place to discover a red test, because the tag
+# is already public by the time anyone finds out. This runs the same suite at the
+# only moment it is still cheap to fail.
+#
+# Headless by construction, so this needs a bare ubuntu runner and the .NET SDK
+# and nothing else: Chariot is a daemon with no window, and its tests drive real
+# listeners on real loopback sockets. A test that ever needs a package installed
+# here is a test that stopped being self-contained.
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    # A CEILING, BECAUSE THIS SUITE HAS HUNG BEFORE. GitHub's default is 360
+    # minutes, which for a suite that normally finishes in well under one is not
+    # a limit, it is an afternoon. 0.4.0's test job blocked for 10m20s on a read
+    # that could not time out and was killed by hand; nothing about that looked
+    # like a defect from the outside, which is exactly why it cost what it did.
+    #
+    # The harness now has its own 20-second ceiling per read (Clients.fs), so a
+    # quiet socket fails with a name attached and this should never be what stops
+    # a run. It is the backstop for the next hang, not the fix for the last one -
+    # if a job ever dies here, something has gone wrong that the harness did not
+    # catch, and the answer is to find it rather than to raise this number. §15.1.
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      # EmuSen.Pegasus.Core comes from nuget.org and is published from a
+      # `core-v*` tag in the EmuSen.Pegasus repository. A restore failure naming
+      # a version that does not exist yet is not a broken build here: it means a
+      # protocol change was written across both repositories and the core half is
+      # not resolvable yet - which is NOT the same as not published, because
+      # indexing lags the publish by minutes. §15.2 has the order to release in
+      # and the one-line check that settles it.
+      - run: dotnet restore
+      - run: dotnet build --no-restore
+      - run: dotnet test --no-build --verbosity normal
