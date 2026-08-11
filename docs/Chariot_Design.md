@@ -573,6 +573,8 @@ Rehearsed locally before being committed, on `linux-x64`: all three pass, the se
 
 **`v0.2.0` was tagged, built three platforms, published nothing, and did not fail.** Recorded rather than quietly retagged, because the failure mode is the part worth knowing.
 
+**The tag itself no longer exists** — it was deleted once 0.3.0 had shipped, so the release list does not carry a version that published nothing. This section is therefore the only remaining record of it, and nothing was ever distributed under `v0.2.0`, so removing it took nothing back from anybody.
+
 The matrix asked for `macos-13` for the `osx-x64` build, and **that image was retired on 4 December 2025**. The observed run — `test` green, `linux-x64` green, `win-x64` green, `osx-arm64` green, `osx-x64` **queued** indefinitely — is what a retired label looks like from the outside. The replacement, now named, is `macos-15-intel`.
 
 **A retired label does not error, it queues.** No red job, no message, nothing in the summary saying the label is gone. `fail-fast: true` never tripped because nothing failed, and §12's rule that a release missing a platform is worse than no release worked exactly as designed: `release` needs all four builds, three arrived, and it never started. The safety property held and the diagnosis was still invisible.
