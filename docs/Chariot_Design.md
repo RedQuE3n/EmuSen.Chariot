@@ -568,3 +568,17 @@ Rehearsed locally before being committed, on `linux-x64`: all three pass, the se
 - **The smoke test starts the server; it does not connect to it.** No client signs in, no frame crosses the wire, no note is relayed. What is proven is that the binary runs and its storage works, not that the protocol does; the suite is what covers the protocol, and it runs on `ubuntu-latest` only.
 - **No `linux-arm64` build**, so a Raspberry Pi still cannot run a released relay. Building from source on the machine is one `dotnet publish`.
 - **The macOS and Windows binaries are now built and started on their own operating systems**, which is a genuine change from v0.1.0 — but by a runner, not by a person, and nobody has run a relay in anger on either.
+
+### 12.3 0.2.0 was spent on a retired runner image
+
+**`v0.2.0` was tagged, built three platforms, published nothing, and did not fail.** Recorded rather than quietly retagged, because the failure mode is the part worth knowing.
+
+The matrix asked for `macos-13` for the `osx-x64` build, and **that image was retired on 4 December 2025**. The observed run — `test` green, `linux-x64` green, `win-x64` green, `osx-arm64` green, `osx-x64` **queued** indefinitely — is what a retired label looks like from the outside. The replacement, now named, is `macos-15-intel`.
+
+**A retired label does not error, it queues.** No red job, no message, nothing in the summary saying the label is gone. `fail-fast: true` never tripped because nothing failed, and §12's rule that a release missing a platform is worse than no release worked exactly as designed: `release` needs all four builds, three arrived, and it never started. The safety property held and the diagnosis was still invisible.
+
+**The pin caused it and unpinning is still wrong.** Naming images explicitly rather than `macos-latest` was argued for on the grounds that `latest` has already moved architecture once and would silently turn `osx-x64` into a cross-compile. That still holds. A pin trades drift for expiry, and of the two, a build that stops producing anything is safer than one that produces something and is wrong about how it was made.
+
+**`macos-15-intel` is the last x86_64 image Actions will offer and it goes away in August 2027.** Apple discontinued the architecture and Actions follows. After that, `osx-x64` is either cross-compiled from an Apple Silicon runner — which would cost this repository the smoke test in §12.1 for that platform, since an arm64 runner cannot be relied on to execute an x86_64 binary — or dropped. **That is the sharper consequence here than next door**: Pegasus would only lose a claim about where a binary was compiled, whereas Chariot would lose the check that actually starts it. Written down because a runner image with a known end date is remembered right up until the release it breaks.
+
+Pegasus took the identical defect from the identical file on the same day; `Pegasus_Design.md` §15.4 records it there.

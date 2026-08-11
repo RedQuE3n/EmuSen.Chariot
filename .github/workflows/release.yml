@@ -46,12 +46,21 @@ jobs:
         include:
           - rid: linux-x64
             os: ubuntu-latest
-          # Pinned by number rather than macos-latest: `latest` has already
+          # Pinned by name rather than macos-latest: `latest` has already
           # moved from Intel to Apple Silicon once, and the day it moves again
           # is the day osx-x64 is quietly cross-compiled again with nobody
           # editing this file.
+          #
+          # NOT macos-13, which this file asked for on its first run and which
+          # was RETIRED on 4 December 2025. A retired label does not fail - the
+          # job sits queued forever, so three platforms went green and the
+          # release simply never happened. §12.3.
+          #
+          # macos-15-intel is the LAST x86_64 image Actions will offer and it
+          # goes away in August 2027, after which osx-x64 cannot be built on
+          # Intel hardware here at all. §12.3 carries the date.
           - rid: osx-x64
-            os: macos-13
+            os: macos-15-intel
           - rid: osx-arm64
             os: macos-14
           - rid: win-x64
