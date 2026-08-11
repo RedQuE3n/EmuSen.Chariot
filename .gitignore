@@ -9,3 +9,8 @@ out/
 *.db-shm
 *.db-wal
 
+
+# A folder feed, populated by `dotnet pack` in the EmuSen.Pegasus checkout,
+# and present only while a core version is unpublished. NuGet.config says when
+# it goes. Packages are build output and belong here no more than bin/ does.
+local-packages/

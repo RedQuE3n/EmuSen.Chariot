@@ -152,13 +152,87 @@ type Client(host: string, port: int, passphrase: string, identity: Identity) =
     /// these exact bytes.
     member _.PostTo(destination: Handle, joinKey: byte[], frame: Frame) =
         let sealedBytes = Crypto.seal joinKey (Codec.encode frame)
-        Framing.writeSealed stream (ToHandle destination) sealedBytes ct |> _.GetAwaiter().GetResult()
+        Framing.writeSealed stream (ToHandle(destination, NoteTraffic)) sealedBytes ct |> _.GetAwaiter().GetResult()
 
     /// Writes an envelope a client has no business writing, for the tests that
     /// check the server says so.
     member _.Forge(envelope: Envelope, joinKey: byte[], frame: Frame) =
         let sealedBytes = Crypto.seal joinKey (Codec.encode frame)
         Framing.writeSealed stream envelope sealedBytes ct |> _.GetAwaiter().GetResult()
+
+    /// Publishes this client's card, which is what makes it reachable by
+    /// message at all.
+    member _.PublishCard() = write (Card(Messaging.cardOf identity))
+
+    /// Asks for somebody's card and waits for the answer.
+    ///
+    /// Returns the frame rather than the card, because "there is no such card"
+    /// is one of the two answers and a test has to be able to assert it.
+    member this.AskFor(who: Handle, timeoutMs: int) =
+        write (Ask who)
+        let deadline = DateTime.UtcNow.AddMilliseconds(float timeoutMs)
+
+        let rec next () =
+            if DateTime.UtcNow > deadline then
+                failwith "the server never answered the ask"
+            else
+                match Codec.decode (Crypto.openSealed key (this.NextSealedDirect timeoutMs)) with
+                | Card card -> Card card
+                | Unknown handle -> Unknown handle
+                | _ -> next ()
+
+        next ()
+
+    /// Sends a real sealed message to somebody, the way the application does.
+    member _.MessageTo(recipient: Handle, theirMessagingKey: byte[], body: string) =
+        let id = MessageId.New()
+
+        let plain =
+            Codec.encode (Message(id, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), body))
+
+        let sealedBytes = Messaging.seal identity theirMessagingKey plain
+        Framing.writeSealed stream (ToHandle(recipient, MessageTraffic)) sealedBytes ct
+        |> _.GetAwaiter().GetResult()
+
+        id
+
+    /// Waits for a delivered message, opens it, and hands back the post id as
+    /// well as the text — the id being what the recipient must acknowledge.
+    member _.NextMessage(sender: byte[], timeoutMs: int) =
+        let deadline = DateTime.UtcNow.AddMilliseconds(float timeoutMs)
+
+        let rec next () =
+            if DateTime.UtcNow > deadline then
+                failwith "no message was delivered"
+            else
+                match Framing.readSealed stream ct |> _.GetAwaiter().GetResult() with
+                | FromHandle(who, MessageTraffic, post), payload ->
+                    match Messaging.tryOpen identity sender payload with
+                    | Some plain ->
+                        match Codec.decode plain with
+                        | Message(id, _, body) -> who, post, id, body
+                        | other -> failwith $"expected a message, got {other.GetType().Name}"
+                    | None -> failwith "a delivered message did not open"
+                | _ -> next ()
+
+        next ()
+
+    /// The refusal a sender is told about, for the tests that check a message
+    /// which did not go anywhere says so.
+    member this.NextUndeliverable(timeoutMs: int) =
+        let deadline = DateTime.UtcNow.AddMilliseconds(float timeoutMs)
+
+        let rec next () =
+            if DateTime.UtcNow > deadline then
+                failwith "the server never said it could not deliver"
+            else
+                match Codec.decode (Crypto.openSealed key (this.NextSealedDirect timeoutMs)) with
+                | Undeliverable(who, why) -> who, why
+                | _ -> next ()
+
+        next ()
+
+    member _.Acknowledge(posts: int64[]) = write (Ack posts)
 
     /// Waits for a forwarded payload and opens it with the join code, which is
     /// the whole point: Chariot moved something it could not read.
@@ -170,7 +244,7 @@ type Client(host: string, port: int, passphrase: string, identity: Identity) =
                 failwith "nothing was delivered"
             else
                 match Framing.readSealed stream ct |> _.GetAwaiter().GetResult() with
-                | FromHandle sender, payload -> sender, Codec.decode (Crypto.openSealed joinKey payload)
+                | FromHandle(sender, _, _), payload -> sender, Codec.decode (Crypto.openSealed joinKey payload)
                 | _ -> next ()
 
         next ()

@@ -237,8 +237,44 @@ type Server(port: int, passphrase: string, dbPath: string, ?queueLimit: int, ?ma
                             | Direct ->
                                 match Codec.decode (Crypto.openSealed controlKey.Value payload) with
                                 | Bye -> raise (EndOfStreamException "client said goodbye")
+                                | Card card ->
+                                    // Filed against the handle this connection
+                                    // PROVED, not against the handle inside the
+                                    // card. They are checked to be the same and
+                                    // a mismatch is refused, because a client
+                                    // publishing a card in somebody else's name
+                                    // is the one attack a key directory must not
+                                    // be talked into. §14.
+                                    if card.Handle.Folded <> peer.Handle.Folded then
+                                        refused.Trigger
+                                            $"{peer.Handle.Value} published a card for {card.Handle.Value}, which is not its own handle"
+                                    elif not (Messaging.verifyCard card) then
+                                        // Checked here as well as at the
+                                        // recipient, and neither check makes
+                                        // the other redundant: this one stops a
+                                        // useless card being stored and served
+                                        // to everybody who asks, and the
+                                        // recipient's stops a card this server
+                                        // invented. A relay that only verified
+                                        // would still be trusted; one that only
+                                        // stored would be a vector.
+                                        refused.Trigger
+                                            $"{peer.Handle.Value} published a messaging key its identity key did not sign"
+                                    else
+                                        Accounts.publishCard dbPath peer.Handle card
+                                | Ask who ->
+                                    match Accounts.cardFor dbPath who with
+                                    | Some card -> wire.Say(Card card)
+                                    | None -> wire.Say(Unknown who)
+                                | Ack posts ->
+                                    // The only thing that deletes a message.
+                                    // Scoped to this recipient's own post, so a
+                                    // client cannot acknowledge — and thereby
+                                    // destroy — somebody else's mail by
+                                    // guessing row ids.
+                                    this.Forget(peer.Handle, posts)
                                 | _ -> ()
-                            | ToHandle destination -> this.Route(peer, destination, payload)
+                            | ToHandle(destination, channel) -> this.Route(peer, destination, channel, payload, wire)
                             | FromHandle _ ->
                                 // FromHandle is the relay's stamp on delivery.
                                 // A client sending one is claiming to be this
@@ -278,31 +314,102 @@ type Server(port: int, passphrase: string, dbPath: string, ?queueLimit: int, ?ma
     /// An unregistered destination is refused rather than queued. Queueing for a
     /// handle nobody has ever signed in as would let any client fill the disk by
     /// posting to names it invented.
-    member private _.Route(sender: PeerInfo, destination: Handle, payload: byte[]) =
+    member private _.Route(sender: PeerInfo, destination: Handle, channel: Channel, payload: byte[], back: Wire) =
         let known =
             Accounts.all dbPath |> Array.exists (fun (handle, _) -> Handle.Parse(handle).Folded = destination.Folded)
 
         if not known then
             refused.Trigger $"{sender.Handle.Value} addressed {destination.Value}, which has never signed in here"
+
+            // Told to the sender on the message channel, and only logged on the
+            // note channel. The difference is what a sender can do about it: a
+            // person who typed a message to a name that does not exist has to
+            // learn that, while a note update addressed to a stale handle is
+            // sync plumbing nobody is watching.
+            if channel = MessageTraffic then
+                back.Say(Undeliverable(destination, $"{destination.Value} has never signed in to this server."))
         else
+
+        match channel with
+        | NoteTraffic ->
+            // Unchanged, and correct as it always was. Forwarded live to every
+            // place that handle is signed in — over-delivering costs nothing
+            // because Yjs updates are idempotent (§6) — and queued only when
+            // nobody is there.
             match presence.WiresFor destination with
-            | [||] -> Mailbox.put dbPath queueLimit destination sender.Handle payload |> ignore
+            | [||] -> Mailbox.put dbPath queueLimit NoteTraffic destination sender.Handle payload |> ignore
             | recipients ->
                 for recipient in recipients do
-                    recipient.Forward (FromHandle sender.Handle) payload
+                    recipient.Forward (FromHandle(sender.Handle, NoteTraffic, 0L)) payload
+
+        | MessageTraffic ->
+            // STORED FIRST, ALWAYS, EVEN WHEN THE RECIPIENT IS RIGHT THERE.
+            //
+            // This is the change §13.2 argues for and it is the whole of the
+            // durability claim. Forwarding a live message straight through
+            // would leave it in exactly one place — a socket buffer — and a
+            // recipient whose connection dies mid-write would lose it with
+            // nothing anywhere able to notice. Writing it down first costs one
+            // insert and means every message has a row, and therefore an id, and
+            // therefore something to acknowledge.
+            //
+            // Presence stops deciding whether a message is kept and decides only
+            // whether it is handed over NOW.
+            match Mailbox.put dbPath queueLimit MessageTraffic destination sender.Handle payload with
+            | Full held ->
+                refused.Trigger $"{sender.Handle.Value} addressed {destination.Value}, whose message queue holds {held}"
+
+                back.Say(
+                    Undeliverable(
+                        destination,
+                        $"{destination.Value} has {held} messages waiting and cannot take more until they sign in. "
+                        + "Nothing was lost — the message was not sent."
+                    )
+                )
+            | Queued id ->
+                for recipient in presence.WiresFor destination do
+                    recipient.Forward (FromHandle(sender.Handle, MessageTraffic, id)) payload
 
     /// Hands over everything held for a handle that has just arrived.
     ///
     /// Cleared by id rather than by recipient, so post that arrives while this
     /// is running is not deleted undelivered.
+    /// Hands over everything held for a handle that has just arrived.
+    ///
+    /// THE TWO CHANNELS ARE CLEARED BY DIFFERENT THINGS and that asymmetry is
+    /// the point. Note post is deleted the moment it is handed over, which is
+    /// what it always was and is safe because a lost update converges back later
+    /// from the sender's replica. Message post is NOT deleted here — it is
+    /// deleted when the recipient says it has written it down (`Forget`, from an
+    /// Ack). A client that dies between this loop and its own disk gets the
+    /// message again on its next sign-in, and the id inside the seal turns that
+    /// second copy into a no-op at the recipient. §13.2.
     member private _.Deliver(handle: Handle, wire: Wire) =
         Mailbox.prune dbPath maxAgeDays |> ignore
         let waiting = Mailbox.peek dbPath handle
 
         for post in waiting do
-            wire.Forward (FromHandle post.Sender) post.Payload
+            wire.Forward (FromHandle(post.Sender, post.Channel, post.Id)) post.Payload
 
-        Mailbox.clear dbPath (waiting |> List.map _.Id)
+        waiting
+        |> List.filter (fun post -> post.Channel = NoteTraffic)
+        |> List.map _.Id
+        |> Mailbox.clear dbPath
+
+    /// Deletes acknowledged post, and only this recipient's.
+    ///
+    /// The ids are checked against the recipient rather than trusted, because
+    /// they are row numbers a client could otherwise guess: an unscoped delete
+    /// would let anybody with an account destroy anybody else's waiting mail by
+    /// acknowledging numbers it never received.
+    member private _.Forget(handle: Handle, posts: int64[]) =
+        let mine =
+            Mailbox.peek dbPath handle |> List.map _.Id |> Set.ofList
+
+        posts
+        |> Array.filter mine.Contains
+        |> Array.toList
+        |> Mailbox.clear dbPath
 
     /// Accepts for as long as the token allows. Every client is served on its
     /// own task, because a server that accepted one at a time would be a server

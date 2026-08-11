@@ -584,3 +584,190 @@ The matrix asked for `macos-13` for the `osx-x64` build, and **that image was re
 **`macos-15-intel` is the last x86_64 image Actions will offer and it goes away in August 2027.** Apple discontinued the architecture and Actions follows. After that, `osx-x64` is either cross-compiled from an Apple Silicon runner — which would cost this repository the smoke test in §12.1 for that platform, since an arm64 runner cannot be relied on to execute an x86_64 binary — or dropped. **That is the sharper consequence here than next door**: Pegasus would only lose a claim about where a binary was compiled, whereas Chariot would lose the check that actually starts it. Written down because a runner image with a known end date is remembered right up until the release it breaks.
 
 Pegasus took the identical defect from the identical file on the same day; `Pegasus_Design.md` §15.4 records it there.
+
+## 13. The mailbox argument does not survive an instant message
+
+§6 is the section this project has been proudest of, and this is the section
+that takes half of it back.
+
+What §6 says is that the mailbox is trivial, and that this is a gift rather than
+cleverness: `Pegasus_Sync.md` §4 establishes that the payloads are Yjs updates,
+so delivery is **idempotent** and **order-independent**, and every hard part of a
+message queue — ordering, exactly-once, acknowledgement, deduplication — is
+therefore *not needed*. §6.1 goes further and argues that a bound is safe,
+because **every peer keeps a complete replica on its own disk**, so a dropped
+blob costs promptness and never content: *"what is lost is promptness, not
+content. Losing content would take the sender's disk failing as well."*
+
+Every clause of that is true of a note edit. None of it is true of a message.
+
+| | Yjs update | Instant message |
+|---|---|---|
+| Delivered twice | merges to the same document | appears in the transcript twice |
+| Delivered out of order | merges to the same document | a different conversation |
+| **Dropped** | **converges from the sender's replica** | **gone from the world** |
+
+The third row is the one that matters, and it is not a degradation of §6.1's
+argument — it is the removal of its premise. There is no second replica of a
+message. A sender does not hold a copy that will reconcile later; it holds a copy
+in its own transcript and that is a separate record, not a replica that converges
+with anything. So the sentence *"what is lost is promptness, not content"*
+becomes exactly false the moment the payload is a message, and the 512-item trim
+that §6.1 licensed would have silently destroyed people's post.
+
+**§6 and §6.1 are not edited.** They were right about what they were written
+about, and they are still right about the note channel, which behaves today
+exactly as they describe. What has happened is that a second kind of payload
+arrived and inherited a policy that was never argued for it. That is the ordinary
+way a correct design goes wrong, and it is worth having on the record in that
+shape rather than tidied into having been foreseen.
+
+The fix is a **channel**, in the clear, beside the destination in the envelope
+(`Types.fs` in the core). Chariot cannot infer which kind of payload it is
+holding — it cannot open either — so it has to be told, and the two channels then
+get the delivery rules each of them actually needs. What this costs in metadata
+is one bit: Chariot already learned the sender, the recipient, the time and the
+byte count, and now also learns whether a payload is a note edit or a message. It
+does not move the line, which is content.
+
+### 13.1 Refusing is better than evicting, and the sender is told
+
+On the note channel a full queue trims the oldest, and §6.1's argument for that
+still holds: the newest updates are the ones a recipient is most likely to need
+in isolation, and refusing new post would make a full queue permanently full.
+
+On the message channel the same trim is the data loss. The oldest message is not
+superseded by anything, so evicting it destroys it, and nobody finds out — not
+the recipient, who never knew it existed, and not the sender, who watched it
+leave. So the message queue **refuses** instead, and the refusal goes back to the
+sender as an `Undeliverable` frame naming the recipient and saying why.
+
+Two consequences worth stating plainly rather than discovering:
+
+- **A mailbox can stay full.** Somebody who never comes back holds their slice of
+  the queue until an operator clears it. That is the price of not dropping
+  things, and it is bounded per recipient so one correspondent cannot starve
+  everybody else.
+- **Age never removes a message.** The prune exists for note post nobody came
+  back for, on the argument that a peer away a fortnight resynchronises from a
+  state vector anyway. That argument has no meaning for a conversation: a person
+  away three weeks still wants what was said. `Mailbox.prune` is scoped
+  `AND channel = 0` and a test drives it with a negative cutoff to prove a
+  message survives what deletes every note in the queue.
+
+### 13.2 Stored before it is forwarded, forgotten only when acknowledged
+
+The queue used to be reached only when the recipient was absent: present meant
+forward, absent meant store. For messages that is now wrong in both halves.
+
+**Stored first, always.** A message forwarded straight through exists in exactly
+one place — a socket buffer — so a recipient whose connection dies mid-write
+loses it with nothing anywhere able to notice. Writing it down first costs one
+insert and means every message has a row, therefore an id, therefore something
+that can be acknowledged. Presence stops deciding whether a message is *kept* and
+decides only whether it is handed over *now*.
+
+This is not hypothetical, and the evidence arrived by accident. This project's own
+test for the queue bound had been posting to a recipient whose socket had closed
+but whose departure the server had not yet processed — so the post was forwarded
+into a dead socket, the guarded write swallowed the failure, and nothing was
+queued at all (§13.3). On the note channel that is the liveness loss §6.1 permits.
+On the message channel, store-first is exactly what makes that race harmless: the
+message is on disk before the forward is attempted, and a forward that goes
+nowhere costs nothing.
+
+**Forgotten only on an `Ack`.** The mailbox row id rides back to the client in the
+envelope, and `Mailbox.clear` is called from an acknowledgement and from nowhere
+else on this channel. A client that dies between the delivery and its own disk
+write simply never acknowledges, and the message is handed over again on its next
+sign-in. That is what makes redelivery ordinary rather than exceptional, and it is
+why the recipient deduplicates on a `MessageId` inside the seal — a primary key
+in the client's own store turns the second copy into a no-op.
+
+Two things the acknowledgement had to be careful about:
+
+- **Ids are row numbers, so they are guessable.** An unscoped delete would let
+  anybody with an account destroy anybody else's waiting mail by acknowledging
+  numbers it never received. `Forget` intersects what was acknowledged with what
+  that recipient actually holds.
+- **The client acknowledges after writing, not before.** That ordering lives in
+  `Relay.receiveMessage` in the desktop application, and the comment there says
+  so, because it is the half of the durability guarantee this repository cannot
+  enforce.
+
+### 13.3 What an extra query cost, and the latent race it exposed
+
+A first draft of `Mailbox.put` returned the new row's id on both channels, which
+meant a `SELECT last_insert_rowid()` after every queued note. Nothing used it —
+`Route` discards it on the note path — so it was removed, and notes now report
+`Queued 0L`, the same zero the envelope uses for "there is nothing here to
+acknowledge".
+
+It is recorded because it was not free. That one extra query per queued update
+slowed the note path enough to make `the queue is bounded, and drops the oldest`
+start failing about one run in five, having passed since the day it was written.
+
+**The test was wrong, and the server was not.** It signed a recipient in, closed
+that connection, and immediately posted six updates. Closing a socket does not
+make the server believe anybody has left — it learns that when its own read loop
+notices the stream has ended, on its schedule and not the test's — so post
+addressed to somebody still believed present was *forwarded into a dead socket*
+rather than queued, the guarded write swallowed the failure, and the queue the
+assertion then examined was empty. The extra query shifted the timing enough to
+lose a race the test had been winning by luck for a year.
+
+Two things came out of it and both are kept:
+
+- The test now waits for the departure to be **processed** (`Presence.Everyone`
+  no longer naming the recipient) rather than for the socket to be closed.
+- It waits on the queue's **contents** rather than on its count. `count = 3` is
+  not a terminal condition when six items are on their way — the queue passes
+  through three — so a poll landing there reads a state that is real and not
+  final. The settled contents only ever hold at the end.
+
+The general lesson is the one worth keeping: **a guard that polls for a
+non-terminal condition is a guard that can observe a correct system in a wrong
+state.** It had been latent in this suite from the beginning, and it took an
+unrelated performance change to surface it.
+
+## 14. The card directory, and what stops a relay lying through it
+
+A message is sealed to a key its recipient published, which means the sender has
+to be able to learn that key for somebody who is **not signed in** — otherwise a
+messenger can only write to people who are already there, which is not a
+messenger. So Chariot serves a directory: `accounts` grew a `message_key` and a
+`message_signature`, a client publishes a `Card` on sign-in, and an `Ask` gets a
+`Card` back or an `Unknown`.
+
+**This is the closest Chariot has ever come to being an authority on who somebody
+is**, and §5's whole position is that it routes without reading. So what stops it
+lying has to be stated rather than assumed:
+
+1. **The messaging key is signed by the identity key.** A relay that swapped in a
+   key it holds the private half of would have to forge a signature from an
+   identity key it does not have. Chariot verifies this itself before storing —
+   not because its own check protects a client, but because serving a card that
+   cannot verify wastes everybody's time.
+2. **The identity key is the one the client already pinned.** This is the check
+   that actually matters, and it happens at the *recipient*, in
+   `KnownPeers.acceptCard`. A relay inventing an entire card — new identity key,
+   new messaging key, consistent signature — passes check 1 and fails this one,
+   because the identity key is not what that handle was pinned to on first sight.
+3. **A card is filed against the handle the connection PROVED**, not the handle
+   written inside it. A client publishing a card in somebody else's name is
+   refused and logged. Without this, any account could replace any other
+   account's messaging key, which is the entire attack a directory has to
+   survive.
+
+What none of that defends is the **first** card for a handle nobody has seen
+before, which is exactly the first-contact hole trust on first use has always had
+(§7, and `Pegasus_Identity.md` §7). The mitigation is unchanged and it is human:
+the fingerprint is on screen to be read aloud. A relay that lies at that moment
+has been the person you meant from the start.
+
+**Chariot's own identity has no card and publishes none.** A relay proves who it
+is and is never anybody's correspondent, so it holds a signing key and generates
+a throwaway agreement key per load that it stores nowhere. The comment in the
+core's `Messaging.signingOnly` records what would have to change first if that
+ever stopped being true — a key regenerated every boot would look to every client
+like a different server.

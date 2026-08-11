@@ -280,9 +280,11 @@ let ``queued post is stored sealed, and the server cannot read it`` () =
     Assert.Equal(note "nobody at this server may read this", Codec.decode (Crypto.openSealed joinKey held.Payload))
 
 [<Fact>]
-let ``the queue is bounded, and drops the oldest`` () =
-    // A bound is safe because the queue is liveness and not durability: the
-    // sender still holds a complete replica, so what is lost is promptness.
+let ``the note queue is bounded, and drops the oldest`` () =
+    // A bound is safe ON THE NOTE CHANNEL because that queue is liveness and not
+    // durability: the sender still holds a complete replica, so what is lost is
+    // promptness. §13 withdraws that argument for messages, and the test below
+    // this one is the other half of the pair.
     use running = new Running(queueLimit = 3)
     use aliceId = identity "alice"
     use bobId = identity "bob"
@@ -292,19 +294,47 @@ let ``the queue is bounded, and drops the oldest`` () =
         bob.SignIn()
         Assert.True(waitFor 5000 (fun () -> Accounts.all(running.Db).Length = 1))
 
+    // WAITS FOR BOB TO BE GONE, not merely for his socket to be closed, and
+    // this line is the whole of a defect this test carried from the day it was
+    // written. Closing a connection does not make the server think anybody has
+    // left: it learns that when its own read loop notices the stream has ended,
+    // which happens on the server's schedule and not on the test's. Post
+    // addressed to somebody the server still believes is present is FORWARDED
+    // rather than queued — into a socket nobody is reading — and the guarded
+    // write swallows the failure, so the mailbox stays empty and the assertion
+    // below reports a queue that was never filled rather than a bound that did
+    // not hold.
+    //
+    // It passed for a year because the departure usually won the race. It began
+    // failing about one run in five when messaging changed the timing around it,
+    // which is the only reason anybody looked. Nothing about the server was
+    // wrong either way. §13.3.
+    Assert.True(
+        waitFor 5000 (fun () ->
+            running.Server.Presence.Everyone
+            |> Array.forall (fun peer -> peer.Handle.Folded <> bobId.Handle.Folded)),
+        "the server still believed bob was connected"
+    )
+
     use alice = running.Connect aliceId
     alice.SignIn()
 
     for i in 1..6 do
         alice.PostTo(bobId.Handle, joinKey, note $"note {i}")
 
-    Assert.True(waitFor 5000 (fun () -> Mailbox.count running.Db bobId.Handle = 3), "the queue was not bounded")
-
-    let kept =
+    // Waits on the CONTENT rather than on the count, for a second and smaller
+    // reason: the queue passes through three items on its way to six, so
+    // `count = 3` is true for a moment while notes 1, 2 and 3 are in it. A poll
+    // landing there would read the wrong contents out of a queue that had not
+    // finished filling. The state below only ever holds at the end.
+    let kept () =
         Mailbox.peek running.Db bobId.Handle
         |> List.map (fun post -> Codec.decode (Crypto.openSealed joinKey post.Payload))
 
-    Assert.Equal<Frame list>([ note "note 4"; note "note 5"; note "note 6" ], kept)
+    let expected = [ note "note 4"; note "note 5"; note "note 6" ]
+
+    Assert.True(waitFor 5000 (fun () -> kept () = expected), "the queue did not settle at the newest three")
+    Assert.Equal(3, Mailbox.count running.Db bobId.Handle)
 
 [<Fact>]
 let ``post addressed to a handle that has never signed in is refused, not queued`` () =
@@ -333,7 +363,7 @@ let ``a client may not stamp a delivery as coming from somebody`` () =
 
     use alice = running.Connect aliceId
     alice.SignIn()
-    alice.Forge(FromHandle(Handle.Parse "bob"), joinKey, note "pretending to be bob")
+    alice.Forge(FromHandle(Handle.Parse "bob", NoteTraffic, 0L), joinKey, note "pretending to be bob")
 
     Assert.True(waitFor 5000 (fun () -> refusals.Count > 0), "a forged FromHandle was accepted")
     Assert.Contains("not a client's to write", refusals[0])
@@ -490,3 +520,284 @@ let ``closing one device leaves the person present at the other`` () =
 
     (desktop :> IDisposable).Dispose()
     Assert.True(waitFor 5000 (fun () -> departures.Count = 1), "the last device leaving was not a departure")
+
+// ---------------------------------------------------------------------------
+// Messages: the channel whose post may not be dropped
+//
+// Every test below exists because §13 withdrew an argument. The mailbox was
+// built on Yjs updates being idempotent, order-independent and safe to discard,
+// and none of that survives contact with an instant message. These are the
+// guards on what replaced it.
+// ---------------------------------------------------------------------------
+
+/// Signs in and publishes a card, which is the pair of things that make somebody
+/// reachable by message. Publishing is not optional: a message is sealed to a
+/// key its recipient published, so a client that never published one cannot be
+/// written to at all.
+/// WAITS FOR THE CARD TO LAND, and not merely for it to be sent. Publishing is
+/// a frame the server processes on its own schedule, so a test that asked for
+/// somebody's card immediately after they arrived could be told, truthfully,
+/// that there is no such card yet. Doing the wait here rather than at each call
+/// site means no test can forget it.
+let private arrive (running: Running) (who: Identity) =
+    let client = running.Connect who
+    client.SignIn()
+    client.PublishCard()
+
+    if not (waitFor 5000 (fun () -> (Accounts.cardFor running.Db who.Handle).IsSome)) then
+        failwith $"{who.Handle.Value} signed in but the card never arrived"
+
+    client
+
+let private cardOf (client: Client) (who: Handle) =
+    match client.AskFor(who, 5000) with
+    | Card card -> card
+    | other -> failwith $"expected a card, got {other.GetType().Name}"
+
+[<Fact>]
+let ``a card is served to whoever asks, and is signed by the identity it names`` () =
+    use running = new Running()
+    use aliceId = identity "alice"
+    use bobId = identity "bob"
+
+    do
+        use bob = arrive running bobId
+        Assert.True(waitFor 5000 (fun () -> (Accounts.cardFor running.Db bobId.Handle).IsSome))
+
+    use alice = arrive running aliceId
+    let card = cardOf alice bobId.Handle
+
+    Assert.Equal(bobId.Handle, card.Handle)
+    Assert.Equal<byte[]>(bobId.MessagingPublicKey, card.Messaging)
+
+    // The property the directory rests on: the relay could have invented this
+    // card, and the signature is what says it did not. Checked here the way a
+    // client checks it, against the identity key rather than against anything
+    // the relay said about it.
+    Assert.True(Messaging.verifyCard card, "the served card was not signed by the identity it names")
+
+[<Fact>]
+let ``a card published for somebody else's handle is refused`` () =
+    // The attack a key directory has to survive. If this were accepted, anybody
+    // with an account could replace anybody's messaging key with one they hold
+    // the private half of, and every message to that person would open for them.
+    use running = new Running()
+    use aliceId = identity "alice"
+    use bobId = identity "bob"
+    let refusals = ResizeArray<string>()
+    running.Server.Refused.Add refusals.Add
+
+    do
+        use bob = arrive running bobId
+        Assert.True(waitFor 5000 (fun () -> (Accounts.cardFor running.Db bobId.Handle).IsSome))
+
+    use alice = running.Connect aliceId
+    alice.SignIn()
+
+    // Alice publishes a perfectly well-formed card. It is Bob's handle and
+    // Alice's keys, and Alice's own signature over her own messaging key, so
+    // nothing about it fails verification — it fails because the connection
+    // publishing it proved it was alice.
+    let stolen =
+        { Messaging.cardOf aliceId with Handle = bobId.Handle }
+
+    alice.Send(Card stolen)
+
+    Assert.True(waitFor 5000 (fun () -> refusals.Count > 0), "a card for somebody else's handle was accepted")
+    Assert.Contains("not its own handle", refusals[0])
+
+    // And the real one is untouched.
+    let served = (Accounts.cardFor running.Db bobId.Handle).Value
+    Assert.Equal<byte[]>(bobId.MessagingPublicKey, served.Messaging)
+
+[<Fact>]
+let ``a message for a connected peer is stored as well as handed over`` () =
+    // §13.2, and the reason is not caution. A message forwarded straight through
+    // exists in exactly one place — a socket buffer — so a recipient whose
+    // connection dies mid-write loses it with nothing anywhere able to notice.
+    // Storing first means every message has a row, therefore an id, therefore
+    // something to acknowledge.
+    use running = new Running()
+    use aliceId = identity "alice"
+    use bobId = identity "bob"
+
+    use bob = arrive running bobId
+    use alice = arrive running aliceId
+    Assert.True(waitFor 5000 (fun () -> running.Server.Presence.Everyone.Length = 2))
+
+    let card = cardOf alice bobId.Handle
+    alice.MessageTo(bobId.Handle, card.Messaging, "straight over and written down") |> ignore
+
+    let _, post, _, body = bob.NextMessage(aliceId.MessagingPublicKey, 5000)
+    Assert.Equal("straight over and written down", body)
+
+    // Delivered AND still held, which is exactly what a note would not be.
+    Assert.True(post > 0L, "a delivered message carried no post id to acknowledge")
+    Assert.Equal(1, Mailbox.countOn running.Db MessageTraffic bobId.Handle)
+
+[<Fact>]
+let ``a message is kept until it is acknowledged, and then forgotten`` () =
+    use running = new Running()
+    use aliceId = identity "alice"
+    use bobId = identity "bob"
+
+    use bob = arrive running bobId
+    use alice = arrive running aliceId
+    Assert.True(waitFor 5000 (fun () -> running.Server.Presence.Everyone.Length = 2))
+
+    let card = cardOf alice bobId.Handle
+    alice.MessageTo(bobId.Handle, card.Messaging, "acknowledge me") |> ignore
+
+    let _, post, _, _ = bob.NextMessage(aliceId.MessagingPublicKey, 5000)
+    Assert.Equal(1, Mailbox.countOn running.Db MessageTraffic bobId.Handle)
+
+    bob.Acknowledge [| post |]
+    Assert.True(waitFor 5000 (fun () -> Mailbox.countOn running.Db MessageTraffic bobId.Handle = 0), "an acknowledged message was kept")
+
+[<Fact>]
+let ``an unacknowledged message is delivered again on the next sign-in`` () =
+    // The durability claim, end to end. Bob receives a message and dies before
+    // acknowledging it — which is what a client that crashes between the socket
+    // and its own disk looks like from here — and the message is still there.
+    use running = new Running()
+    use aliceId = identity "alice"
+    use bobId = identity "bob"
+
+    use alice = arrive running aliceId
+
+    do
+        use bob = arrive running bobId
+        Assert.True(waitFor 5000 (fun () -> running.Server.Presence.Everyone.Length = 2))
+        let card = cardOf alice bobId.Handle
+        alice.MessageTo(bobId.Handle, card.Messaging, "say it twice") |> ignore
+        bob.NextMessage(aliceId.MessagingPublicKey, 5000) |> ignore
+        // Leaves WITHOUT acknowledging.
+
+    Assert.Equal(1, Mailbox.countOn running.Db MessageTraffic bobId.Handle)
+
+    use returned = arrive running bobId
+    let _, post, _, body = returned.NextMessage(aliceId.MessagingPublicKey, 5000)
+    Assert.Equal("say it twice", body)
+
+    returned.Acknowledge [| post |]
+    Assert.True(waitFor 5000 (fun () -> Mailbox.countOn running.Db MessageTraffic bobId.Handle = 0), "the redelivered message was never cleared")
+
+[<Fact>]
+let ``a full message queue refuses new post and tells the sender`` () =
+    // The other half of §13. The note channel trims the oldest and is right to;
+    // doing that here would destroy somebody's message, so the sender is
+    // refused instead — and told, because a message that silently did not arrive
+    // is the failure this whole channel was rebuilt to stop having.
+    use running = new Running(queueLimit = 2)
+    use aliceId = identity "alice"
+    use bobId = identity "bob"
+
+    do
+        use bob = arrive running bobId
+        Assert.True(waitFor 5000 (fun () -> (Accounts.cardFor running.Db bobId.Handle).IsSome))
+
+    use alice = arrive running aliceId
+
+    Assert.True(
+        waitFor 5000 (fun () ->
+            running.Server.Presence.Everyone
+            |> Array.forall (fun peer -> peer.Handle.Folded <> bobId.Handle.Folded)),
+        "the server still believed bob was connected"
+    )
+
+    let card = cardOf alice bobId.Handle
+
+    for i in 1..2 do
+        alice.MessageTo(bobId.Handle, card.Messaging, $"message {i}") |> ignore
+
+    Assert.True(waitFor 5000 (fun () -> Mailbox.countOn running.Db MessageTraffic bobId.Handle = 2), "the queue did not fill")
+
+    alice.MessageTo(bobId.Handle, card.Messaging, "one too many") |> ignore
+
+    let who, why = alice.NextUndeliverable 5000
+    Assert.Equal(bobId.Handle, who)
+    Assert.Contains("cannot take more", why)
+
+    // NOTHING WAS EVICTED, which is the point. A trim here would have thrown
+    // away "message 1" to make room, and neither party would ever have known.
+    Assert.Equal(2, Mailbox.countOn running.Db MessageTraffic bobId.Handle)
+
+    let kept =
+        Mailbox.peek running.Db bobId.Handle
+        |> List.map (fun post -> Messaging.tryOpen bobId aliceId.MessagingPublicKey post.Payload)
+        |> List.map (fun opened ->
+            match opened |> Option.map Codec.decode with
+            | Some(Message(_, _, body)) -> body
+            | _ -> "unopenable")
+
+    Assert.Equal<string list>([ "message 1"; "message 2" ], kept)
+
+[<Fact>]
+let ``ageing out never touches a message`` () =
+    // A guard against reintroducing the defect §13 removed, by a route that
+    // would look innocent: the prune exists for note post nobody came back for,
+    // and a WHERE clause that forgot the channel would quietly delete
+    // unacknowledged messages on every sign-in.
+    use running = new Running()
+    use aliceId = identity "alice"
+    use bobId = identity "bob"
+
+    do
+        use bob = arrive running bobId
+        Assert.True(waitFor 5000 (fun () -> (Accounts.cardFor running.Db bobId.Handle).IsSome))
+
+    use alice = arrive running aliceId
+
+    Assert.True(
+        waitFor 5000 (fun () ->
+            running.Server.Presence.Everyone
+            |> Array.forall (fun peer -> peer.Handle.Folded <> bobId.Handle.Folded)),
+        "the server still believed bob was connected"
+    )
+
+    let card = cardOf alice bobId.Handle
+    alice.MessageTo(bobId.Handle, card.Messaging, "older than the cutoff") |> ignore
+    alice.PostTo(bobId.Handle, joinKey, note "a note of the same age")
+
+    Assert.True(waitFor 5000 (fun () -> Mailbox.count running.Db bobId.Handle = 2), "the post never arrived")
+
+    // Everything in the queue is now "old". The note goes; the message stays.
+    Mailbox.prune running.Db -1.0 |> ignore
+
+    Assert.Equal(0, Mailbox.countOn running.Db NoteTraffic bobId.Handle)
+    Assert.Equal(1, Mailbox.countOn running.Db MessageTraffic bobId.Handle)
+
+[<Fact>]
+let ``a client cannot acknowledge away somebody else's post`` () =
+    // Post ids are row numbers, so they are guessable. An unscoped delete would
+    // let anybody with an account destroy anybody else's waiting mail.
+    use running = new Running()
+    use aliceId = identity "alice"
+    use bobId = identity "bob"
+    use malloryId = identity "mallory"
+
+    do
+        use bob = arrive running bobId
+        Assert.True(waitFor 5000 (fun () -> (Accounts.cardFor running.Db bobId.Handle).IsSome))
+
+    use alice = arrive running aliceId
+
+    Assert.True(
+        waitFor 5000 (fun () ->
+            running.Server.Presence.Everyone
+            |> Array.forall (fun peer -> peer.Handle.Folded <> bobId.Handle.Folded)),
+        "the server still believed bob was connected"
+    )
+
+    let card = cardOf alice bobId.Handle
+    alice.MessageTo(bobId.Handle, card.Messaging, "for bob's eyes") |> ignore
+    Assert.True(waitFor 5000 (fun () -> Mailbox.countOn running.Db MessageTraffic bobId.Handle = 1))
+
+    let held = Mailbox.peek running.Db bobId.Handle |> List.map _.Id |> List.toArray
+
+    use mallory = arrive running malloryId
+    mallory.Acknowledge held
+
+    // Given a moment to do the damage it is not allowed to do.
+    Thread.Sleep 300
+    Assert.Equal(1, Mailbox.countOn running.Db MessageTraffic bobId.Handle)
