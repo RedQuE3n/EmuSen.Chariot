@@ -274,11 +274,23 @@ stays about transport. §3.
 
 ## Licence
 
-GPL-3.0-or-later, as a consequence of linking `EmuSen.Pegasus.Core`, which is
-published under it.
+MIT.
 
-The `LICENSE` file carrying the full text is now present, and closing that gap
-was a precondition for the first binary release rather than tidying: GPL-3.0 §4
-and §5 require the licence to be conveyed *with* the work, and a release page
-offering compiled executables conveys the work to people who never see the
-repository. Source for those binaries is this repository at the `v0.1.0` tag.
+**It used to be GPL-3.0-or-later as a consequence of linking
+`EmuSen.Pegasus.Core`, which used to be published under it.** Core is MIT from
+0.3.0, this repository links 0.3.0, and the consequence has gone. §11 records
+the change, including the one question it had to answer that no other project
+in the family did: this repository is a hard fork, and somebody else's code is
+in its history.
+
+The `v0.1.0` binaries were released under GPL-3.0-or-later and stay so. A grant
+already made is not withdrawn by a later one, and source for those binaries
+remains this repository at the `v0.1.0` tag.
+
+**One older correction is kept, because it is still the useful part.** The
+`LICENSE` file was missing until shortly before that first release, and closing
+the gap was a precondition for shipping rather than tidying: GPL-3.0 §4 and §5
+required the licence to be conveyed *with* the work, and a release page offering
+compiled executables conveys the work to people who never see the repository.
+MIT asks for the same thing in one sentence rather than two sections, and the
+file is there now either way.

@@ -16,7 +16,7 @@
     <RootNamespace>EmuSen.Chariot</RootNamespace>
 
     <!-- 0.1.0, the first released relay, on a `v*` tag. Not the same number as
-         the EmuSen.Pegasus.Core package it speaks through, which is at 0.2.2 —
+         the EmuSen.Pegasus.Core package it speaks through, which is at 0.3.0 —
          that one versions on the protocol, this one on the server. Pegasus the
          desktop application is 0.1.0 as well, and that is a coincidence of both
          being released for the first time on the same day rather than a rule
@@ -48,8 +48,15 @@
          downgrade against a package this project had just been told to trust.
          That warning, raised from this file, is how the defect was found; both
          versions are unlisted on nuget.org now. Pegasus_Design.md §7.1 in the
-         EmuSen.Pegasus repository carries the full account. -->
-    <PackageReference Include="EmuSen.Pegasus.Core" Version="0.2.2" />
+         EmuSen.Pegasus repository carries the full account.
+
+         0.3.0 is not the protocol either — still the same wire, frame for
+         frame, and Hello still says 4. It is the relicence: 0.2.x is
+         GPL-3.0-or-later and 0.3.0 is MIT. This bump is load-bearing rather
+         than housekeeping, because §11 relicenses THIS repository to MIT and a
+         program cannot honestly claim MIT while linking a GPL library. The
+         version below is what makes the LICENSE file beside it true. -->
+    <PackageReference Include="EmuSen.Pegasus.Core" Version="0.3.0" />
     <!-- Microsoft.Data.Sqlite alone resolves SQLitePCLRaw 2.1.11, which carries
          a high-severity advisory (GHSA-2m69-gcr7-jv3q) - the very advisory §2.2
          cites against the stack this replaces. The 3.0.5 bundle pin overrides

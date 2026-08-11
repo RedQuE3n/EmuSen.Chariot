@@ -490,3 +490,50 @@ test that passes for the wrong reason is worth knowing about.
 - **Not groups, yet.** `Pegasus_Sync.md` §1 records that a host accepts exactly
   one joiner. Chariot could lift that limit and deliberately does not in these
   passes; one thing at a time.
+
+---
+
+## 11. The relicence, and the question a fork has to answer
+
+Chariot is **MIT**.
+
+### 11.1 The chain, and where it stopped
+
+The licence arrived here at the end of a chain, and every link in it was a consequence rather than a decision. EmuSen chose GPL-3.0. LunaP was a folder in EmuSen and carried the term out with it when it left, without re-deciding it. Pegasus links LunaP, so its design record wrote that its licence was "not a free choice". Chariot links `EmuSen.Pegasus.Core`, so this README said the same thing in the same words: *"GPL-3.0-or-later, as a consequence of linking `EmuSen.Pegasus.Core`, which is published under it."*
+
+Four projects, one decision, made once by the only one of them that is an emulator. LunaP re-decided first (`docs/LunaP.md` §25 there), then Pegasus (`Pegasus_Design.md` §14), and each found the same thing: nothing in its own dependency tree had been imposing a copyleft term either. Chariot is the last link, and EmuSen — the one project that actually chose GPL-3.0 on its own account — keeps it.
+
+**The mechanical part of this section is `EmuSen.Pegasus.Core` 0.3.0.** Core 0.2.x is GPL-3.0-or-later on nuget.org. A program cannot honestly put an MIT file at its root while linking a GPL library, because the licence is a statement about the work as distributed and the distributed work would contain both. So the reference in `EmuSen.Chariot.fsproj` moving from 0.2.2 to 0.3.0 is not housekeeping alongside this change; it is the change. The protocol is untouched — same wire, frame for frame, Hello still says 4.
+
+### 11.2 The fork, and whether MIT is ours to grant
+
+Every other project in this family had one copyright holder and a boring answer. This one does not, and §2 is why: **the repository is a hard fork of `cheshire-84/8BB-MSGR.NET`**, and the first commit in its history — `63fc015`, "first commit" — is not ours. Twelve commits, eleven by one author and one by another.
+
+Two facts decide it, and both were checked rather than remembered.
+
+**Upstream carries no licence.** `cheshire-84/8BB-MSGR.NET` is a public repository with no `LICENSE` file, and the fork's first commit brought none either. That cuts both ways and the unfavourable way matters more: no licence means no grant, so the fork rests on the offer §2 describes — the repository "offered to this project after being set aside" — rather than on any written term. It also means **the GPL here was never inherited from upstream**. It was added by us, in `9feca8c`, "Ship the licence file the README admitted was missing". Chariot's GPL was our own act, taken for the reason in §11.1.
+
+**None of the forked code survives, and this was verified rather than assumed.** §2.1 already argued it at length — everything in `ChatHub.cs` is `Clients.All` where Pegasus is pairwise, the payload is chat where Pegasus moves sealed frames, nothing persists, there are no tests. What that section asserts, this one measured: there is **not one `.cs` file left in the repository**. `Program.cs`, `Hubs/ChatHub.cs`, `Models/ChatMessage.cs` and `Data/TodoDbContext.cs` are all gone, deleted in pass 4 once the F# replaced them. §2.1's sentence holds exactly as written — *"the concept is kept and credited, the code is not"* — and a concept is not a thing copyright reaches.
+
+So the work this repository distributes is entirely ours, and MIT over it is ours to grant.
+
+**What that argument does not cover, stated plainly rather than left for a reader to notice.** `63fc015` is still in the history, and `git log` will hand anybody 231 lines of somebody else's C# under no licence at all. The MIT file at the root governs the work, not every blob ever committed beneath it, and that is the ordinary reading — but it is a reading, and this section would be dishonest if it presented the question as not having been asked.
+
+**The alternative was to ask, and it was considered rather than overlooked.** A written line from Cheshire would close the question permanently and cost one message. It was not taken because the fork's contribution is already established, in writing and in detail, as an idea rather than an expression, and §2.1 was written before there was any licence question riding on it — which is the strongest form that record could take. Recorded here so that if the question is ever reopened, the reasoning is on the page and not reconstructed. **The credit in §2 stays where it is, and is not contingent on the licence.**
+
+### 11.3 The audit
+
+Read out of each package's own `<license>` expression rather than recalled:
+
+| Licence | Packages |
+|---|---|
+| MIT | `EmuSen.Pegasus.Core` (0.3.0), `Microsoft.Data.Sqlite`, `Microsoft.NET.Test.Sdk` |
+| Apache-2.0 | `SQLitePCLRaw.bundle_e_sqlite3`, `xunit`, `xunit.runner.visualstudio` |
+
+No copyleft in the tree. The Apache-2.0 entries are permissive and carry notice terms rather than reciprocal ones, and two of the three are test-only. The `SQLitePCLRaw` pin is the one that ships, and §2.2 already records why it is pinned at 3.0.5 — the advisory, not the licence.
+
+### 11.4 What stays GPL
+
+`v0.1.0` was released as compiled binaries under GPL-3.0-or-later and **stays that way**. A grant already made to somebody who took the work is not withdrawn by a later and looser one, and source for those binaries remains this repository at that tag. A relicence is not a recall.
+
+Chariot is not itself a published package, so unlike LunaP and Core there is no nuget.org metadata frozen behind it — the only artefact carrying the old term is that release, and it keeps it honestly.
