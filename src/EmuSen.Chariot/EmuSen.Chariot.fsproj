@@ -15,14 +15,19 @@
     <AssemblyName>EmuSen.Chariot</AssemblyName>
     <RootNamespace>EmuSen.Chariot</RootNamespace>
 
-    <!-- 0.1.0, the first released relay, on a `v*` tag. Not the same number as
-         the EmuSen.Pegasus.Core package it speaks through, which is at 0.3.0 —
+    <!-- The relay's own version, on a `v*` tag. Not the same number as the
+         EmuSen.Pegasus.Core package it speaks through, which is at 0.3.0 —
          that one versions on the protocol, this one on the server. Pegasus the
-         desktop application is 0.1.0 as well, and that is a coincidence of both
-         being released for the first time on the same day rather than a rule
-         that they move together. What has to agree between the two programs is
-         the protocol number in Hello, not the version on the download. -->
-    <Version>0.1.0</Version>
+         desktop application is at 0.2.0 as well, and that stays a coincidence of
+         the two being released together rather than a rule that they move
+         together. What has to agree between the two programs is the protocol
+         number in Hello, not the version on the download.
+
+         THE RELEASED VERSION COMES FROM THE TAG: release.yml strips the `v` and
+         passes -p:Version, so the tag decides what the binary reports and what
+         the archives are called. This number is the default for a local
+         `dotnet publish` and is kept in step so the two never disagree - §12. -->
+    <Version>0.2.0</Version>
   </PropertyGroup>
 
   <ItemGroup>

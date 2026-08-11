@@ -1,0 +1,246 @@
+# Build the relay for every released platform and publish it as a GitHub release
+# when a version tag is pushed.
+#
+#     git tag v0.2.0 && git push origin v0.2.0
+#
+# THIS IS THE FIRST WORKFLOW IN THIS REPOSITORY. There was no CI here at all,
+# which is why the `test` job below runs the suite rather than trusting that
+# something else already did: until this file existed, nothing ran `dotnet test`
+# except a person remembering to.
+#
+# THE VERSION COMES FROM THE TAG. The `v` is stripped and passed as -p:Version,
+# so the tag decides what the binary reports and what the archives are named.
+# The <Version> in the .fsproj is the default for a local publish and is kept in
+# step; a version written in two places is one that will eventually disagree
+# with itself. docs/Chariot_Design.md §12.
+#
+# WHY A MATRIX ON NATIVE RUNNERS: v0.1.0's four builds were all cross-compiled
+# on one Linux laptop and none of the macOS or Windows ones had ever been
+# started. Each RID is now built by the operating system it targets AND, unlike
+# Pegasus next door, actually run - see the smoke step, which is the part of
+# this file worth reading.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - run: dotnet test
+
+  build:
+    needs: test
+    strategy:
+      # A release missing one platform is worse than no release: SHA256SUMS
+      # would be internally consistent over what it lists and silent about what
+      # never built.
+      fail-fast: true
+      matrix:
+        include:
+          - rid: linux-x64
+            os: ubuntu-latest
+          # Pinned by number rather than macos-latest: `latest` has already
+          # moved from Intel to Apple Silicon once, and the day it moves again
+          # is the day osx-x64 is quietly cross-compiled again with nobody
+          # editing this file.
+          - rid: osx-x64
+            os: macos-13
+          - rid: osx-arm64
+            os: macos-14
+          - rid: win-x64
+            os: windows-latest
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      # Self-contained and single-file: the .NET runtime and SQLite are inside
+      # one executable, so a relay is one file to drop on a VPS with no runtime
+      # to install first. IncludeNativeLibrariesForSelfExtract is what carries
+      # e_sqlite3; without it the binary builds, ships, and dies the moment it
+      # opens its accounts database - which is exactly what the smoke step below
+      # would catch.
+      - name: Publish ${{ matrix.rid }}
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "building $VERSION for ${{ matrix.rid }}"
+          dotnet publish src/EmuSen.Chariot/EmuSen.Chariot.fsproj \
+            -c Release -r ${{ matrix.rid }} --self-contained true \
+            -p:PublishSingleFile=true \
+            -p:IncludeNativeLibrariesForSelfExtract=true \
+            -p:Version="$VERSION" \
+            -o publish
+
+      # The archive layout is v0.1.0's, read off the published artifact rather
+      # than remembered: a single top-level Chariot-<rid> directory holding the
+      # executable, LICENSE and README.md. There is NO .app bundle on macOS and
+      # that asymmetry with Pegasus is deliberate - a daemon has no window, so a
+      # bundle would buy it nothing but a Finder icon it never shows.
+      #
+      # Only the executable is staged; `dotnet publish` also leaves a .pdb and
+      # debug symbols are not part of the program.
+      - name: Stage the archive
+        shell: bash
+        run: |
+          STAGE="Chariot-${{ matrix.rid }}"
+          mkdir -p "$STAGE"
+          if [ "${{ matrix.rid }}" = "win-x64" ]; then
+            cp publish/EmuSen.Chariot.exe "$STAGE/EmuSen.Chariot.exe"
+          else
+            cp publish/EmuSen.Chariot "$STAGE/EmuSen.Chariot"
+            chmod +x "$STAGE/EmuSen.Chariot"
+          fi
+          cp LICENSE README.md "$STAGE/"
+
+      # THE STEP THIS FILE EXISTS FOR, and the thing Pegasus cannot do: Chariot
+      # is a daemon, so it can be started on a runner and asked to prove it
+      # works. It runs against the STAGED binary - the exact bytes that go into
+      # the archive - and writes its database and log outside the staging
+      # directory so nothing extra lands in the download.
+      #
+      # Three checks, in increasing order of what they prove:
+      #
+      #   1. --help exits 2 and prints usage. Proves the single-file bundle
+      #      self-extracts and the runtime starts at all. Exit 2 and not 0 is
+      #      correct and is asserted rather than tolerated: --help goes through
+      #      the same Error path as a bad option, which is a real decision in
+      #      Program.fs and would be a silent behaviour change if it moved.
+      #   2. It refuses to start with no CHARIOT_PASSPHRASE. Proves the refusal
+      #      that stops a relay coming up open to the world still fires in a
+      #      released build.
+      #   3. It starts, opens its accounts database and reaches the listening
+      #      line. THIS is the one worth having: --help never touches SQLite, so
+      #      only this proves e_sqlite3 was carried into the bundle and
+      #      extracted. A missing native is invisible until a database is
+      #      opened, and the first person to open one must not be a user.
+      #
+      # Port 47420 rather than the default 7420 so a runner with anything else
+      # bound cannot make this flaky.
+      - name: Smoke test the built binary
+        shell: bash
+        run: |
+          set -u
+          STAGE="Chariot-${{ matrix.rid }}"
+          if [ "${{ matrix.rid }}" = "win-x64" ]; then
+            BIN="./$STAGE/EmuSen.Chariot.exe"
+          else
+            BIN="./$STAGE/EmuSen.Chariot"
+          fi
+          mkdir -p smoketmp
+
+          echo "1. --help prints usage and exits 2"
+          set +e
+          OUT="$("$BIN" --help 2>&1)"; CODE=$?
+          set -e
+          echo "$OUT" | head -1
+          [ "$CODE" -eq 2 ] || { echo "FAIL: --help exited $CODE, expected 2"; exit 1; }
+          case "$OUT" in *"usage: chariot"*) ;; *) echo "FAIL: no usage text"; exit 1 ;; esac
+
+          echo "2. refuses to start with no passphrase"
+          set +e
+          OUT="$(env -u CHARIOT_PASSPHRASE "$BIN" --port 47420 --db smoketmp/none.db 2>&1)"; CODE=$?
+          set -e
+          [ "$CODE" -eq 2 ] || { echo "FAIL: expected exit 2, got $CODE"; exit 1; }
+          case "$OUT" in
+            *"CHARIOT_PASSPHRASE is not set"*) ;;
+            *) echo "FAIL: unexpected refusal: $OUT"; exit 1 ;;
+          esac
+
+          echo "3. starts, opens its database, and listens"
+          rm -f smoketmp/smoke.db smoketmp/smoke.log
+          CHARIOT_PASSPHRASE=smoke "$BIN" --port 47420 --db smoketmp/smoke.db \
+            > smoketmp/smoke.log 2>&1 &
+          PID=$!
+          for _ in $(seq 1 30); do
+            grep -q "chariot listening on" smoketmp/smoke.log 2>/dev/null && break
+            kill -0 "$PID" 2>/dev/null || break
+            sleep 1
+          done
+          kill "$PID" 2>/dev/null || true
+          echo "--- server output ---"
+          cat smoketmp/smoke.log || true
+          grep -q "chariot listening on" smoketmp/smoke.log \
+            || { echo "FAIL: never reached the listening line"; exit 1; }
+          [ -f smoketmp/smoke.db ] \
+            || { echo "FAIL: no database - e_sqlite3 did not make it into the bundle"; exit 1; }
+          echo "OK: ${{ matrix.rid }} runs, listens, and opens SQLite"
+
+      - name: Archive
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          STAGE="Chariot-${{ matrix.rid }}"
+          if [ "${{ matrix.rid }}" = "win-x64" ]; then
+            # Windows runners ship 7z. PowerShell's Compress-Archive would also
+            # work and mangles the executable bit, which does not matter for a
+            # win-x64 zip and would the moment this list grows a unix platform.
+            7z a -tzip "Chariot-$VERSION-win-x64.zip" "$STAGE" >/dev/null
+          else
+            tar czf "Chariot-$VERSION-${{ matrix.rid }}.tar.gz" "$STAGE"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Chariot-${{ matrix.rid }}
+          path: |
+            *.tar.gz
+            *.zip
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+
+    permissions:
+      # gh release create writes to this repository. Nothing else here does.
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      # Nothing is signed - that needs a paid certificate from Apple or a
+      # code-signing CA and there is not one - so SHA256SUMS is the only
+      # integrity evidence a download has. Generated here over the artefacts
+      # about to be uploaded.
+      - name: Checksum
+        working-directory: dist
+        run: |
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+
+      # The notes are prose and prose belongs in the repository, reviewed with
+      # the change it describes rather than typed into a web form at the moment
+      # of release. A tag with no notes file falls back to generated ones rather
+      # than failing: the binaries are what is being shipped and a missing
+      # paragraph must not block them.
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          NOTES="docs/Releases/${GITHUB_REF_NAME}.md"
+          if [ -f "$NOTES" ]; then
+            gh release create "$GITHUB_REF_NAME" dist/* \
+              --title "Chariot $VERSION" --notes-file "$NOTES"
+          else
+            echo "no $NOTES - falling back to generated notes"
+            gh release create "$GITHUB_REF_NAME" dist/* \
+              --title "Chariot $VERSION" --generate-notes
+          fi

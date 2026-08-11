@@ -537,3 +537,34 @@ No copyleft in the tree. The Apache-2.0 entries are permissive and carry notice 
 `v0.1.0` was released as compiled binaries under GPL-3.0-or-later and **stays that way**. A grant already made to somebody who took the work is not withdrawn by a later and looser one, and source for those binaries remains this repository at that tag. A relicence is not a recall.
 
 Chariot is not itself a published package, so unlike LunaP and Core there is no nuget.org metadata frozen behind it — the only artefact carrying the old term is that release, and it keeps it honestly.
+
+## 12. The release became a workflow, and the relay can prove more than the notepad
+
+§11 relicensed this repository, which made a second binary release necessary, and going to cut one exposed what the first had been: four `dotnet publish` runs on one Linux laptop, staging directories assembled beside them by hand, and `gh release create` typed at the end. **No file in this repository produced those binaries.** Worse here than next door, because until now `.github/workflows/` did not exist at all — there was no CI in this repository, so `dotnet test` ran when somebody remembered to run it and never otherwise.
+
+`release.yml` fixes both at once. It fires on a `v*` tag, runs the suite before anything is built, builds each RID on the operating system it targets, and creates the release from artefacts it checksums itself. The version comes from the tag and is passed as `-p:Version`, so the tag decides what the binary reports; the `<Version>` in `EmuSen.Chariot.fsproj` is the local default and is kept in step, because a version written in two places is one that will eventually disagree with itself.
+
+The archive layout is v0.1.0's, and it was **read off the published artefact rather than remembered** — `Chariot-<rid>/` holding the executable, `LICENSE` and `README.md`. There is no `.app` bundle on macOS and that asymmetry with Pegasus is deliberate: a daemon has no window, so a bundle would buy it nothing but a Finder icon it never shows.
+
+### 12.1 The smoke test, and why this repository gets one when Pegasus does not
+
+This is the part worth reading, and it is the one place where being the boring program in the family is an advantage.
+
+Pegasus is a GUI. A CI runner has no display and the application has no `--help`, so its release can build binaries on the right operating system and still not start one — its notes say so, and `Pegasus_Design.md` §15.1 states the limit rather than dressing it up. **Chariot is a daemon**, which means it can be started, asked a question, and made to answer on every platform it ships to. So it is.
+
+Three checks run against the *staged* binary — the exact bytes that go into the archive — with the database and log written outside the staging directory so nothing extra lands in the download. In increasing order of what they prove:
+
+1. **`--help` prints usage and exits 2.** Proves the single-file bundle self-extracts and the runtime comes up at all. The exit code is asserted rather than tolerated: `--help` goes through the same `Error` path as a bad option in `Program.fs`, which is a real decision, and a future edit moving it to 0 should turn this red rather than pass quietly.
+2. **It refuses to start with no `CHARIOT_PASSPHRASE`.** Proves the refusal that stops a relay coming up open to the world still fires in a *released* build, not merely in a test binary.
+3. **It starts, opens its accounts database, and reaches the listening line.** This is the one worth having. `--help` never touches SQLite, so only this proves `e_sqlite3` was carried into the bundle by `IncludeNativeLibrariesForSelfExtract` and extracted at runtime. **A missing native is invisible until a database is opened**, which on a relay is the first thing that happens after somebody deploys it — and the first person to open one must not be a user.
+
+The third check is the reason the flag in the publish line is not housekeeping. Without it the binary builds, packages, uploads and dies on first run, and every step before this one would have been green.
+
+Rehearsed locally before being committed, on `linux-x64`: all three pass, the server prints `chariot listening on 47420, accounts in smoketmp/smoke.db`, and a 28,672-byte database appears. Port 47420 rather than the default 7420 so a runner with something else bound cannot make it flaky.
+
+### 12.2 What it still does not cover
+
+- **Nothing is signed or notarised**, so `SHA256SUMS` — generated on the runner over the artefacts about to be uploaded — is the only integrity evidence a download has.
+- **The smoke test starts the server; it does not connect to it.** No client signs in, no frame crosses the wire, no note is relayed. What is proven is that the binary runs and its storage works, not that the protocol does; the suite is what covers the protocol, and it runs on `ubuntu-latest` only.
+- **No `linux-arm64` build**, so a Raspberry Pi still cannot run a released relay. Building from source on the machine is one `dotnet publish`.
+- **The macOS and Windows binaries are now built and started on their own operating systems**, which is a genuine change from v0.1.0 — but by a runner, not by a person, and nobody has run a relay in anger on either.
