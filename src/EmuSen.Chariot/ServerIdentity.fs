@@ -60,7 +60,11 @@ module ServerIdentity =
                 + "Clients have pinned the first name against this key; running under the second would look to "
                 + "every one of them like a different server. Use the original name, or a different database."
             )
-        | row :: _ -> Ok(Identity.OfPrivateKey(Handle.Parse row.Handle, row.Private))
+        // `signingOnly`, because a relay proves who it is and is never anybody's
+        // correspondent. The messaging half it gets is generated per load and
+        // stored nowhere; Messaging.fs carries what would have to change first
+        // if a relay ever did publish a card.
+        | row :: _ -> Ok(Messaging.signingOnly (Handle.Parse row.Handle) row.Private)
         | [] ->
             let identity = Identity.Generate handle
             let pkcs8 = identity.ExportPrivateKey()

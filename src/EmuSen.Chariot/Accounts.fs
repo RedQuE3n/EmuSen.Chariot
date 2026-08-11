@@ -80,3 +80,56 @@ module Accounts =
         Db.query db "SELECT display, fingerprint FROM accounts ORDER BY handle" [] (fun r ->
             r.GetString 0, PeerId(r.GetString 1))
         |> List.toArray
+
+    /// Files a client's messaging key against the handle it has already proved
+    /// it owns.
+    ///
+    /// THE CALLER MUST HAVE PROVED THE HANDLE FIRST and Server.fs is where that
+    /// is enforced. This function cannot check it — it is handed a card and a
+    /// row to write — so the guarantee lives at the one call site rather than
+    /// being re-derived here. Accepting a card from an unproven connection would
+    /// let anybody overwrite anybody's messaging key by claiming their name,
+    /// which is the entire attack a key directory has to survive.
+    ///
+    /// The identity key in the card is NOT written. It is already in the row,
+    /// put there by `register` from the key that was actually used to sign the
+    /// challenge, and taking a second copy from a frame would be storing an
+    /// assertion beside a fact — with the obvious failure mode that a later
+    /// reader picks the wrong one. What is served back out is the registered
+    /// key and the messaging key beside it.
+    ///
+    /// UPDATE rather than INSERT OR REPLACE: the row exists by the time this is
+    /// reached, and a REPLACE would quietly recreate an account whose row had
+    /// gone, losing the first_seen that trust on first use rests on.
+    let publishCard (dbPath: string) (handle: Handle) (card: Card) =
+        use db = Db.openAt dbPath
+
+        Db.executeWith
+            db
+            "UPDATE accounts SET message_key = $key, message_signature = $signature WHERE handle = $handle"
+            [ "$key", box card.Messaging
+              "$signature", box card.Signature
+              "$handle", box handle.Folded ]
+        |> ignore
+
+    /// The card for a handle, if that handle has ever published one.
+    ///
+    /// None covers both "no such account" and "an account that has never
+    /// signed in from a build that has messaging", and the caller answers both
+    /// with the same Unknown frame. Distinguishing them would tell a stranger
+    /// which handles exist on this server, which is a question a relay should
+    /// not be helping anybody enumerate.
+    let cardFor (dbPath: string) (handle: Handle) =
+        use db = Db.openAt dbPath
+
+        Db.query
+            db
+            "SELECT display, public_key, message_key, message_signature FROM accounts
+             WHERE handle = $handle AND message_key IS NOT NULL AND message_signature IS NOT NULL"
+            [ "$handle", box handle.Folded ]
+            (fun r ->
+                { Handle = Handle.Parse(r.GetString 0)
+                  Identity = r.GetFieldValue<byte[]> 1
+                  Messaging = r.GetFieldValue<byte[]> 2
+                  Signature = r.GetFieldValue<byte[]> 3 })
+        |> List.tryHead

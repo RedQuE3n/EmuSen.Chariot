@@ -30,8 +30,14 @@
          THE RELEASED VERSION COMES FROM THE TAG: release.yml strips the `v` and
          passes -p:Version, so the tag decides what the binary reports and what
          the archives are called. This number is the default for a local
-         `dotnet publish` and is kept in step so the two never disagree - §12. -->
-    <Version>0.3.0</Version>
+         `dotnet publish` and is kept in step so the two never disagree - §12.
+
+         0.4.0 is messaging: a durable message queue, acknowledgements, and a
+         card directory. It is a bump a relay operator cannot skip, because the
+         protocol moved with it — a 0.3.0 client cannot sign in here, and Hello
+         says so in the first frame rather than letting it be found further
+         down. §13 and §14. -->
+    <Version>0.4.0</Version>
   </PropertyGroup>
 
   <ItemGroup>
@@ -64,8 +70,27 @@
          GPL-3.0-or-later and 0.3.0 is MIT. This bump is load-bearing rather
          than housekeeping, because §11 relicenses THIS repository to MIT and a
          program cannot honestly claim MIT while linking a GPL library. The
-         version below is what makes the LICENSE file beside it true. -->
-    <PackageReference Include="EmuSen.Pegasus.Core" Version="0.3.0" />
+         version below is what makes the LICENSE file beside it true.
+
+         0.4.0 IS the protocol, for the first time since 0.2.0: Hello now says 5,
+         and a 0.3.0 client cannot sign in to a server built against this. The
+         envelope changed shape — a routed frame names its channel and a delivery
+         names the post it came out of — and the envelope is precisely the part
+         this server reads WITHOUT holding a key, so this is not a version a
+         relay could shrug at. §13 carries what the channel bought and why the
+         mailbox had to change with it.
+
+         THIS REPOSITORY CANNOT BUILD UNTIL 0.4.0 IS ON NUGET.ORG, and that is
+         the ordinary consequence of a protocol written across two repositories
+         at once rather than a defect. The core is published from a `core-v*`
+         tag in the EmuSen.Pegasus repository and this restores it from
+         nuget.org like any other package. To work on both at the same time
+         before it is published, add a `local-packages/` folder feed to
+         NuGet.config and fill it with `dotnet pack src/EmuSen.Pegasus.Core -c
+         Release -o <chariot>/local-packages` — and read the note in that file
+         about the cache first, because a rebuilt 0.4.0 is ignored in favour of
+         the copy already extracted under ~/.nuget/packages. -->
+    <PackageReference Include="EmuSen.Pegasus.Core" Version="0.4.0" />
     <!-- Microsoft.Data.Sqlite alone resolves SQLitePCLRaw 2.1.11, which carries
          a high-severity advisory (GHSA-2m69-gcr7-jv3q) - the very advisory §2.2
          cites against the stack this replaces. The 3.0.5 bundle pin overrides
