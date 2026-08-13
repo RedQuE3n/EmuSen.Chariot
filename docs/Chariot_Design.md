@@ -875,3 +875,48 @@ anything else said was that "published" and "restorable" are minutes apart. The
 failure is loud and harmless — a red restore, nothing shipped, nothing to undo —
 but it burns a version number, because a tag that has run is not re-pushed. §12.3
 carries the first version this project spent that way and this is the second.
+
+## 16. The job that never starts, made red
+
+§12.3 recorded that a retired runner image does not fail — it queues, silently,
+while its siblings go green — and concluded that only a person reading the run
+would catch it. §15.1 added ceilings to every job, which does not help here at
+all: a ceiling's clock starts when the job starts, and this is a job that never
+starts.
+
+It is closable by watching rather than by timing. **The signal is a sibling, not
+a clock**: ordinary contention queues every build together and a slow macOS
+runner must not fail a release, but one matrix job still unscheduled long after
+another has *finished* is a different animal, and only a dead label produces it.
+A `watchdog` job polls this run's own `/actions/runs/{id}/jobs`, which reports
+`status: queued` for a job that has never started, and fails when a queued build
+outlives a finished sibling by fifteen minutes.
+
+**It was built and sabotaged in the EmuSen.Pegasus repository**, against a job
+pinned to `ubuntu-does-not-exist` — which is all a retired label is, a string
+matching no runner. It fired at **124s** against a 120s grace and named the stuck
+job. `Pegasus_Design.md` §15.7 carries the full measurements and is not repeated
+here; this repository runs the same guard against the same matrix.
+
+One result from it is worth knowing before anybody reads a red run here, because
+it is not what you would guess: **the run concludes as `cancelled`, not
+`failure`.** Cancelling is the only way to end a run holding a job that will
+never settle, and a cancelled run looks the same whoever asked for it. What
+distinguishes this from somebody pressing the button is the **failed `watchdog`
+job** — a human cancel never leaves one — and the three `::error::` lines naming
+what never started. The cancel therefore lives in a separate `rescue` job rather
+than inside the watchdog, because cancelling from inside kills the watchdog
+mid-sentence and the job holding the diagnosis is recorded as cancelled too.
+
+The other half of §12.3 is now mechanical as well. The `test` job checks a
+**review date** of 2027-06-01 and fails the release past it. `macos-15-intel` is
+the last x86_64 image Actions will offer and is announced for removal in August
+2027; the date sits earlier so it fires while there is still a decision to make
+rather than on the morning `osx-x64` stops building. **When it fires, moving the
+date is the wrong fix** — re-read the pins, change the matrix, then move the date
+to the next thing worth re-reading. A date pushed forward without looking is this
+guard deleted with extra steps.
+
+What is still open is small and recorded rather than solved: the run's conclusion
+is ambiguous until opened, the watchdog occupies a runner for as long as the
+build takes, and nothing can see a label retired between the tag and the build.
